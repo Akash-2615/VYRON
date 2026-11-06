@@ -1,0 +1,110 @@
+{
+  "video_source": "Video Datasets/video_sample1.mp4",
+  "video_sources": [
+    "Video Datasets/record_20250620_183903.mp4",
+    "Video Datasets/record_20250620_184049.mp4",
+    "Video Datasets/record_20250620_184302.mp4",
+    "Video Datasets/record_20250620_184403.mp4",
+    "Video Datasets/record_20250620_184504.mp4",
+    "Video Datasets/record_20250620_184605.mp4",
+    "Video Datasets/record_20250620_184705.mp4",
+    "Video Datasets/record_20250620_184807.mp4",
+    "Video Datasets/record_20250620_184907.mp4",
+    "Video Datasets/record_20250620_185008.mp4",
+    "Video Datasets/record_20250620_185109.mp4",
+    "Video Datasets/record_20250620_185210.mp4",
+    "Video Datasets/record_20250620_190324.mp4",
+    "Video Datasets/record_20250620_190425.mp4",
+    "Video Datasets/record_20250620_190525.mp4",
+    "Video Datasets/record_20250620_190626.mp4",
+    "Video Datasets/record_20250620_190727.mp4",
+    "Video Datasets/record_20250620_190828.mp4",
+    "Video Datasets/record_20250620_190928.mp4",
+    "Video Datasets/record_20250620_191029.mp4",
+    "Video Datasets/record_20250620_191129.mp4",
+    "Video Datasets/record_20250620_191230.mp4",
+    "Video Datasets/video_sample1.mp4"
+  ],
+  "detection_skip_frames": 4,
+
+  "detector": {
+    "weights": "models/yolov8n-face.pt",
+    "weights_url": "https://github.com/akanametov/yolo-face/releases/download/1.0.0/yolov8n-face.pt",
+    "conf_threshold": 0.35,
+    "imgsz": 512,
+    "device": "auto"
+  },
+
+  "recognition": {
+    "model_pack": "buffalo_l",
+    "det_size": 320,
+    "match_threshold": 0.45,
+    "max_embeddings_per_face": 5,
+    "min_embeds_to_register": 2,
+    "embed_retry_interval": 2,
+    "max_embed_attempts": 10
+  },
+
+  "quality": {
+    "min_face_px": 45,
+    "min_blur_var": 35.0
+  },
+
+  "appearance": {
+    "enabled": true,
+    "model": "ViT-B-32",
+    "pretrained": "openai",
+    "device": "auto",
+    "min_crop_px": 48
+  },
+
+  "away_walkers": {
+    "enabled": true,
+    "require_facing_away": false,
+    "away_score_min": 0.35
+  },
+  "person_detector": {
+    "weights": "yolov8n.pt",
+    "conf_threshold": 0.40,
+    "imgsz": 416,
+    "device": "auto",
+    "min_height_px": 80
+  },
+  "away_tracker": {
+    "high_conf": 0.40,
+    "new_track_conf": 0.40,
+    "iou_threshold": 0.25,
+    "min_hits": 2,
+    "max_lost_frames": 25
+  },
+
+  "tracker": {
+    "high_conf": 0.50,
+    "new_track_conf": 0.50,
+    "iou_threshold": 0.25,
+    "min_hits": 2,
+    "max_lost_frames": 20
+  },
+
+  "storage": {
+    "db_path": "data/visitors.db",
+    "log_dir": "logs",
+    "events_log": "logs/events.log",
+    "reset_on_start": true
+  },
+
+  "stream": {
+    "reconnect_delay_sec": 3,
+    "max_reconnects": 0,
+    "read_timeout_sec": 10
+  },
+
+  "output": {
+    "display": false,
+    "annotated_video": "output/annotated.mp4",
+    "live_preview": "output/live.jpg",
+    "live_jpeg_quality": 55,
+    "live_max_width": 960,
+    "live_every_n_frames": 2
+  }
+}

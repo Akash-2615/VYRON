@@ -1,0 +1,13 @@
+---
+description: Face tracker hackathon project rules
+alwaysApply: true
+---
+Read `docs/KNOWLEDGE.md` first: it describes architecture, invariants, config, DB schema, API, known gaps and the prioritized TODO list.
+
+Hard rules:
+- Keep the exactly-one-entry/one-exit-per-visit and unique-count (rows in `faces`) invariants (KNOWLEDGE.md section 4).
+- Heavy model imports stay lazy; the pipeline takes detector/embedder by injection so tests run without models.
+- Run `pytest -q` after changes to src/ or api/; `cd web && npm run build` after changes to web/.
+- DB schema changes need a migration in `Database._migrate`. Never write demo data into real `data/` or `logs/`.
+- Do not claim something is verified unless it was run. Follow the P0 list in KNOWLEDGE.md section 11 before adding features.
+- README must end with: This project is a part of a hackathon run by https://katomaran.com

@@ -1,0 +1,39 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+.env
+.env.*
+
+# models & weights
+models/*.pt
+*.pt
+*.onnx
+
+# runtime data (keep folders via .gitkeep where needed)
+data/*.db
+data/*.db-*
+data/*.mp4
+logs/
+demo/
+output/
+samples/*.csv
+
+# video dataset (too large for git)
+Video Datasets/
+*.mp4
+
+# frontend
+web/node_modules/
+web/dist/
+
+# MediaMTX / certs
+auto.crt
+auto.key
+mediamtx.yml
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
