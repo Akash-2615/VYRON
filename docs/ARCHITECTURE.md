@@ -2,7 +2,8 @@
 
 End-to-end design for the intelligent face tracker: modular Python backend, FastAPI + React dashboard, optional ARIA assistant, optional detector-only preprocess.
 
-Visual overview: [`docs/assets/vyron-architecture.png`](assets/vyron-architecture.png) (also embedded in the README).
+Planning / features / compute: [`PLANNING.md`](PLANNING.md).  
+Visual overview: [`assets/vyron-architecture.png`](assets/vyron-architecture.png) (also embedded in the README).
 
 ## Design goals
 

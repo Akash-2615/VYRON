@@ -12,6 +12,7 @@ Detect → track → recognize → auto-register faces; log **exactly one entry 
 **Submission checklist (README):** setup, assumptions, sample config, planning notes, architecture diagram, Loom/YouTube link, sample output, last line exactly  
 `This project is a part of a hackathon run by https://katomaran.com`.
 
+Planning / features / compute: [`docs/PLANNING.md`](PLANNING.md).  
 Design prompts: [`docs/PROMPTS.md`](PROMPTS.md). Layout & diagrams: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ## 2. What is built
@@ -50,7 +51,7 @@ backend/                    Python root (src + api)
 frontend/                   Vite + React dashboard
 data/                       videos, models, db, runtime, demo (mostly gitignored)
 deploy/                     docker-compose Postgres, MediaMTX
-docs/                       KNOWLEDGE, ARCHITECTURE, PROMPTS, assets/
+docs/                       PLANNING, KNOWLEDGE, ARCHITECTURE, PROMPTS, assets/
 logs/  samples/             deliverables at repo root
 ```
 
