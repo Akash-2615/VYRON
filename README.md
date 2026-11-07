@@ -5,7 +5,7 @@ Real-time visitor counter: **YOLOv8-face** detection, **ByteTrack-style** tracki
 ## Project structure
 
 ```
-intelligent-face-tracker/
+VYRON/
 ├── backend/                 # Python root (tracker + FastAPI + tests)
 │   ├── main.py              # CLI entry (same flags as root main.py)
 │   ├── api/                 # FastAPI app, ARIA assistant, services
@@ -47,8 +47,8 @@ Python imports use `src.*` / `api.*` with `pythonpath=backend`. Paths resolve fr
 ### Install and run (CLI)
 ```bash
 # 1) Clone and enter the repo
-git clone <your-repo-url>
-cd intelligent-face-tracker
+git clone https://github.com/Akash-2615/VYRON.git
+cd VYRON
 
 # 2) Python env + dependencies
 python3 -m venv .venv
