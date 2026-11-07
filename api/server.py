@@ -1,54 +1,96 @@
-"""Read-only dashboard API over the tracker's SQLite DB + image store.
+"""Read-only dashboard API over the tracker DB + image store.
 
     uvicorn api.server:app --port 8000          (run from the repo root)
 
-Env overrides: TRACKER_CONFIG, TRACKER_DB, TRACKER_LOG_DIR  (handy for demo data).
-If web/dist exists (npm run build) it is served at "/", so one process serves everything.
+Requires DATABASE_URL / TRACKER_DSN (local Postgres). Face crops and
+events.log stay under the local logs/ folder. Env: TRACKER_CONFIG,
+TRACKER_LOG_DIR, TRACKER_EVENTS_LOG, GROQ_*. If web/dist exists it is served
+at "/". Unit tests may inject a SQLite Database via create_app(db=...).
 """
 import asyncio
 import json
 import os
 import re
-import sqlite3
 import time
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional, Sequence
 
 import numpy as np
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+
+from src.database import Database
 
 EPOCH = datetime(1970, 1, 1)
 BUCKETS = [1, 5, 10, 30, 60, 300, 900, 3600, 21600, 86400]
 
 
-def _secs(ts: str) -> float:
-    return (datetime.fromisoformat(ts) - EPOCH).total_seconds()
+def _secs(ts) -> float:
+    """Parse ISO timestamps from SQLite/Postgres TEXT (or datetime objects)."""
+    if ts is None:
+        return 0.0
+    if isinstance(ts, datetime):
+        return (ts.replace(tzinfo=None) - EPOCH).total_seconds()
+    s = str(ts).replace("Z", "")
+    # Postgres sometimes returns "YYYY-MM-DD HH:MM:SS[.mmm]"
+    if " " in s and "T" not in s:
+        s = s.replace(" ", "T", 1)
+    return (datetime.fromisoformat(s) - EPOCH).total_seconds()
+
+
+def _as_dict(row: Any) -> dict:
+    if isinstance(row, dict):
+        return dict(row)
+    if hasattr(row, "keys"):
+        return {k: row[k] for k in row.keys()}
+    raise TypeError(f"Cannot convert row: {type(row)}")
+
+
+def _blob(val: Any) -> bytes:
+    if isinstance(val, memoryview):
+        return val.tobytes()
+    if isinstance(val, bytearray):
+        return bytes(val)
+    return val
 
 
 LOG_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}),\d+ \| (\w+)\s*\| (\S+)\s*(.*)$")
 FIELD_RE = re.compile(r"(\w+)=(\S+)")
 
 
-def create_app(db_path: str, log_dir: str, web_dist: Optional[str] = "web/dist",
+def create_app(db_path: Optional[str] = None, log_dir: str = "logs",
+               web_dist: Optional[str] = "web/dist",
                events_log: Optional[str] = None, match_threshold: float = 0.45,
-               live_preview: Optional[str] = "output/live.jpg") -> FastAPI:
+               live_preview: Optional[str] = "output/live.jpg",
+               storage: Optional[dict] = None,
+               db: Optional[Database] = None) -> FastAPI:
     app = FastAPI(title="Face Tracker Analytics API")
-    app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET"], allow_headers=["*"])
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["GET", "POST"],
+        allow_headers=["*"],
+    )
     logs = Path(log_dir).resolve()
     logs.mkdir(parents=True, exist_ok=True)
     log_file = Path(events_log) if events_log else logs / "events.log"
     live_path = Path(live_preview) if live_preview else None
 
-    def connect() -> sqlite3.Connection:
-        con = sqlite3.connect(db_path, timeout=5)
-        con.execute("PRAGMA query_only=ON")
-        con.row_factory = sqlite3.Row
-        return con
+    if db is None:
+        if storage is not None:
+            db = Database.from_storage(storage, reset=False)
+        elif db_path:
+            # Explicit file path → SQLite (unit tests / create_app helpers only).
+            db = Database(path=db_path, backend="sqlite", reset=False)
+        else:
+            raise ValueError("create_app requires db, storage, or db_path")
+
+    def connect():
+        return db.readonly()
 
     def media(p: Optional[str]) -> Optional[str]:
         if not p:
@@ -60,11 +102,14 @@ def create_app(db_path: str, log_dir: str, web_dist: Optional[str] = "web/dist",
 
     def snapshot():
         """Load faces + events once and derive per-visitor stats, dwell times and occupancy."""
-        if not Path(db_path).exists():
+        if not db.exists():
             return [], [], {}, []
-        with connect() as con:
-            faces = [dict(r) for r in con.execute("SELECT * FROM faces ORDER BY face_id")]
-            events = [dict(r) for r in con.execute("SELECT * FROM events ORDER BY timestamp, id")]
+        try:
+            with connect() as con:
+                faces = [_as_dict(r) for r in con.execute("SELECT * FROM faces ORDER BY face_id")]
+                events = [_as_dict(r) for r in con.execute("SELECT * FROM events ORDER BY timestamp, id")]
+        except Exception:  # noqa: BLE001
+            return [], [], {}, []
         stats = {f["face_id"]: {"total_dwell": 0.0, "inside": False, "thumb": None, "latest": None,
                                 "entry_ts": None} for f in faces}
         dwell, inside, peak = [], set(), 0
@@ -89,6 +134,36 @@ def create_app(db_path: str, log_dir: str, web_dist: Optional[str] = "web/dist",
             s["latest"] = img or s["latest"]
         return faces, events, stats, dwell + [peak]  # peak travels as last element
 
+    def _visit_metrics(face_id: int) -> dict:
+        empty = {"time_in_frame_seconds": 0.0, "visible_seconds": 0.0,
+                 "occluded_seconds": 0.0, "resume_count": 0, "hidden_now": False, "visits": []}
+        if not db.exists():
+            return empty
+        try:
+            with connect() as con:
+                rows = [_as_dict(r) for r in con.execute(
+                    "SELECT visit_id, face_id, entry_ts, exit_ts, visible_seconds, occluded_seconds, "
+                    "resume_count, exit_reason FROM visits WHERE face_id=? ORDER BY visit_id",
+                    (face_id,))]
+        except Exception:  # noqa: BLE001
+            return empty
+        vis = sum(float(r["visible_seconds"] or 0) for r in rows)
+        occ = sum(float(r["occluded_seconds"] or 0) for r in rows)
+        resumes = sum(int(r["resume_count"] or 0) for r in rows)
+        open_rows = [r for r in rows if not r.get("exit_ts")]
+        return {
+            "time_in_frame_seconds": round(vis + occ, 1),
+            "visible_seconds": round(vis, 1),
+            "occluded_seconds": round(occ, 1),
+            "resume_count": resumes,
+            "hidden_now": bool(open_rows),
+            "visits": [{
+                "visit_id": r["visit_id"], "entry_ts": r["entry_ts"], "exit_ts": r["exit_ts"],
+                "visible_seconds": r["visible_seconds"], "occluded_seconds": r["occluded_seconds"],
+                "resume_count": r["resume_count"], "exit_reason": r["exit_reason"],
+            } for r in rows],
+        }
+
     def visitor_row(f: dict, s: dict) -> dict:
         appearance = None
         raw = f.get("appearance_json")
@@ -97,29 +172,134 @@ def create_app(db_path: str, log_dir: str, web_dist: Optional[str] = "web/dist",
                 appearance = json.loads(raw)
             except (TypeError, ValueError):
                 appearance = None
+        evidence = None
+        if appearance and isinstance(appearance, dict):
+            evidence = appearance.get("evidence_image")
+        evidence = f.get("appearance_image_path") or evidence
+        metrics = _visit_metrics(int(f["face_id"]))
+        hidden_now = bool(metrics["visits"]) and any(v["exit_ts"] is None for v in metrics["visits"]) and s["inside"]
+        dwell = metrics["time_in_frame_seconds"] or round(s["total_dwell"], 1)
         return {"face_id": f["face_id"], "first_seen": f["first_seen"], "last_seen": f["last_seen"],
-                "visit_count": f["visit_count"], "total_dwell_seconds": round(s["total_dwell"], 1),
+                "visit_count": f["visit_count"], "total_dwell_seconds": dwell,
+                "time_in_frame_seconds": metrics["time_in_frame_seconds"],
+                "visible_seconds": metrics["visible_seconds"],
+                "occluded_seconds": metrics["occluded_seconds"],
+                "resume_count": metrics["resume_count"],
+                "hidden_now": hidden_now,
                 "status": "inside" if s["inside"] else "left",
                 "face_image": media(f.get("image_path")),
                 "thumbnail": media(f.get("image_path")) or s["thumb"] or s["latest"],
                 "latest_image": s["latest"],
                 "appearance_summary": f.get("appearance_summary"),
+                "appearance_image": media(evidence),
                 "appearance": appearance}
 
     @app.get("/api/health")
     def health():
-        return {"ok": True, "db_exists": Path(db_path).exists()}
+        return {
+            "ok": True,
+            "db_exists": db.exists(),
+            "backend": db.backend,
+            "fallback": False,
+        }
+
+    @app.get("/api/videos")
+    def list_videos():
+        """Local videos from config.json (video_sources) for the dashboard picker."""
+        from src.tracker_job import list_local_videos
+        cfg_path = os.environ.get("TRACKER_CONFIG", "config.json")
+        items = list_local_videos(cfg_path)
+        return {
+            "items": items,
+            "available": [v for v in items if v.get("exists")],
+            "count": len(items),
+            "available_count": sum(1 for v in items if v.get("exists")),
+        }
+
+    @app.get("/api/tracker/status")
+    def tracker_status():
+        """Background RTSP tracker job state (started from the dashboard)."""
+        from src.tracker_job import get_tracker_job
+        return get_tracker_job().status()
+
+    @app.post("/api/tracker/start")
+    def tracker_start(payload: dict = Body(default_factory=dict)):
+        """Start detect → track → embed → log on RTSP, one local file, or all video_sources."""
+        from src.tracker_job import get_tracker_job
+        body = payload or {}
+        url = str(body.get("url") or body.get("path") or "").strip()
+        mode = str(body.get("mode") or "rtsp").strip().lower()
+        playlist = str(body.get("playlist") or "one").strip().lower()
+        reset = bool(body.get("reset", False))
+        raw_sources = body.get("sources")
+        sources = None
+        if isinstance(raw_sources, list):
+            sources = [str(s).strip() for s in raw_sources if str(s).strip()]
+        if mode in ("local", "file", "video", "mp4") and playlist in ("all", "playlist", "sources"):
+            # url optional when playing the full configured playlist
+            pass
+        elif mode in ("webcam", "cam", "camera", "device"):
+            url = url or "0"
+        elif not url and not sources:
+            raise HTTPException(400, "Paste an RTSP URL, choose a local video, or pick a webcam")
+        try:
+            st = get_tracker_job().start(
+                url,
+                config_path=os.environ.get("TRACKER_CONFIG", "config.json"),
+                reset=reset,
+                mode=mode,
+                playlist=playlist,
+                sources=sources,
+            )
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        except RuntimeError as e:
+            raise HTTPException(409, str(e)) from e
+        return {"ok": True, **st}
+
+    @app.post("/api/tracker/stop")
+    def tracker_stop():
+        from src.tracker_job import get_tracker_job
+        st = get_tracker_job().stop()
+        return {"ok": True, **st}
 
     @app.get("/api/live/status")
     def live_status():
-        """Whether main.py is publishing annotated frames for the dashboard."""
+        """Whether main.py is publishing annotated frames + in-frame person counts."""
+        empty = {"active": False, "path": None, "age_sec": None,
+                 "persons_in_frame": None, "faces_in_frame": None, "no_face_in_frame": None,
+                 "fps": None, "latency_ms": None, "width": None, "height": None}
         if live_path is None:
-            return {"active": False, "path": None, "age_sec": None}
+            return empty
         if not live_path.is_file():
-            return {"active": False, "path": str(live_path), "age_sec": None}
+            return {**empty, "path": str(live_path)}
         age = time.time() - live_path.stat().st_mtime
-        return {"active": age < 5.0, "path": str(live_path), "age_sec": round(age, 2),
-                "bytes": live_path.stat().st_size}
+        out = {"active": age < 5.0, "path": str(live_path), "age_sec": round(age, 2),
+               "bytes": live_path.stat().st_size,
+               "persons_in_frame": None, "faces_in_frame": None, "no_face_in_frame": None,
+               "fps": None, "latency_ms": int(round(age * 1000)) if age < 5 else None,
+               "width": None, "height": None}
+        stats_file = live_path.with_name("live_stats.json")
+        if stats_file.is_file():
+            try:
+                import json as _json
+                st = _json.loads(stats_file.read_text(encoding="utf-8"))
+                out["persons_in_frame"] = st.get("persons")
+                out["faces_in_frame"] = st.get("faces")
+                out["faces_confirmed"] = st.get("faces_confirmed")
+                out["no_face_in_frame"] = st.get("no_face")
+                out["faces_turned_away"] = st.get("faces_turned_away")
+                out["fps"] = st.get("fps")
+                # Prefer preview size when live JPEG is downscaled for the dashboard.
+                out["width"] = st.get("preview_width") or st.get("width")
+                out["height"] = st.get("preview_height") or st.get("height")
+                if st.get("latency_ms") is not None:
+                    out["latency_ms"] = st.get("latency_ms")
+                if st.get("ts"):
+                    out["stats_age_sec"] = round(time.time() - float(st["ts"]), 2)
+            except (OSError, ValueError, TypeError):
+                pass
+        return out
 
     @app.get("/api/live.jpg")
     def live_jpeg():
@@ -137,18 +317,21 @@ def create_app(db_path: str, log_dir: str, web_dist: Optional[str] = "web/dist",
         async def frames():
             last_mtime = -1.0
             while True:
+                updated = False
                 if live_path is not None and live_path.is_file():
                     try:
                         mtime = live_path.stat().st_mtime
                         if mtime != last_mtime:
                             data = live_path.read_bytes()
                             last_mtime = mtime
+                            updated = True
                             yield (b"--" + boundary + b"\r\nContent-Type: image/jpeg\r\n"
                                    b"Content-Length: " + str(len(data)).encode() + b"\r\n\r\n"
                                    + data + b"\r\n")
                     except OSError:
                         pass
-                await asyncio.sleep(0.08)
+                # Poll faster right after a new frame; idle a bit longer otherwise.
+                await asyncio.sleep(0.03 if updated else 0.06)
 
         return StreamingResponse(
             frames(),
@@ -158,34 +341,88 @@ def create_app(db_path: str, log_dir: str, web_dist: Optional[str] = "web/dist",
         )
 
     def _away_rows():
-        if not Path(db_path).exists():
+        if not db.exists():
             return []
-        with connect() as con:
-            try:
-                return [dict(r) for r in con.execute(
+        try:
+            with connect() as con:
+                return [_as_dict(r) for r in con.execute(
                     "SELECT * FROM away_visitors ORDER BY away_id DESC")]
-            except sqlite3.OperationalError:
-                return []
+        except Exception:  # noqa: BLE001
+            return []
 
     def _away_stats_sql():
-        if not Path(db_path).exists():
+        if not db.exists():
             return {"away_unique": 0, "away_entries": 0, "away_exits": 0,
                     "away_currently": 0, "away_with_clothes": 0}
-        with connect() as con:
-            try:
-                unique = con.execute("SELECT COUNT(*) FROM away_visitors").fetchone()[0]
+        try:
+            with connect() as con:
+                unique = con.execute("SELECT COUNT(*) AS c FROM away_visitors").fetchone()
+                unique = int(_as_dict(unique)["c"] if isinstance(unique, dict) or hasattr(unique, "keys")
+                             else unique[0])
                 rows = con.execute(
-                    "SELECT event_type, COUNT(*) FROM away_events GROUP BY event_type").fetchall()
-                clothed = con.execute(
-                    "SELECT COUNT(*) FROM away_visitors WHERE appearance_summary IS NOT NULL "
-                    "AND appearance_summary != ''").fetchone()[0]
-            except sqlite3.OperationalError:
-                return {"away_unique": 0, "away_entries": 0, "away_exits": 0,
-                        "away_currently": 0, "away_with_clothes": 0}
-        counts = {r[0]: r[1] for r in rows}
+                    "SELECT event_type, COUNT(*) AS c FROM away_events GROUP BY event_type").fetchall()
+                clothed_row = con.execute(
+                    "SELECT COUNT(*) AS c FROM away_visitors WHERE appearance_summary IS NOT NULL "
+                    "AND appearance_summary != ''").fetchone()
+                clothed = int(_as_dict(clothed_row)["c"] if isinstance(clothed_row, dict)
+                              or hasattr(clothed_row, "keys") else clothed_row[0])
+        except Exception:  # noqa: BLE001
+            return {"away_unique": 0, "away_entries": 0, "away_exits": 0,
+                    "away_currently": 0, "away_with_clothes": 0}
+        counts = {}
+        for r in rows:
+            d = _as_dict(r) if not isinstance(r, tuple) else None
+            if d is not None and "event_type" in d:
+                counts[d["event_type"]] = int(d["c"])
+            else:
+                counts[r[0]] = int(r[1])
         entries, exits = counts.get("entry", 0), counts.get("exit", 0)
         return {"away_unique": unique, "away_entries": entries, "away_exits": exits,
                 "away_currently": max(0, entries - exits), "away_with_clothes": clothed}
+
+    _count_cache: dict = {"t": 0.0, "key": "", "val": None}
+
+    @app.get("/api/count")
+    def api_count(session: str = Query("latest")):
+        """Unique visitor count from DB (preferred) with log reconciliation.
+
+        Cached for 2 seconds. Falls back to the log when the DB is missing.
+        """
+        from src.counting import count_from_database, count_from_log, reconcile
+        now = time.time()
+        key = session or "latest"
+        if (_count_cache["key"] == key and _count_cache["val"] is not None
+                and now - _count_cache["t"] < 2.0):
+            return _count_cache["val"]
+        db_counts = count_from_database(db)
+        log_counts = count_from_log(log_file, session=key, include_rotated=True)
+        result = reconcile(
+            db_counts if db_counts.available else None,
+            log_counts if log_counts.available else None,
+        )
+        if db_counts.available:
+            primary, source = db_counts, "db"
+        elif log_counts.available:
+            primary, source = log_counts, "log"
+        else:
+            primary, source = None, "none"
+        payload = {
+            "unique_visitors": primary.unique_visitors if primary else None,
+            "entries": primary.entries if primary else None,
+            "exits": primary.exits if primary else None,
+            "currently_inside": primary.open_visits if primary else None,
+            "returning_visitors": primary.returning_visitors if primary else None,
+            "open_visits": primary.open_visits if primary else None,
+            "source": source,
+            "derived_from_log": log_counts.to_dict() if log_counts.available else None,
+            "consistent": result.get("consistent"),
+            "diffs": result.get("diffs", []),
+            "notes": result.get("notes", []),
+            "session_id": log_counts.session_id if log_counts.available else None,
+            "as_of": datetime.now().isoformat(timespec="seconds"),
+        }
+        _count_cache.update(t=now, key=key, val=payload)
+        return payload
 
     @app.get("/api/summary")
     def summary():
@@ -193,13 +430,41 @@ def create_app(db_path: str, log_dir: str, web_dist: Optional[str] = "web/dist",
         dwell, peak = (extra[:-1], extra[-1]) if extra else ([], 0)
         entries = sum(1 for e in events if e["event_type"] == "entry")
         away = _away_stats_sql()
+        inside = sum(1 for s in stats.values() if s["inside"])
+        hidden_now = 0
+        avg_tif = None
+        if db.exists():
+            try:
+                with connect() as con:
+                    rows = con.execute(
+                        "SELECT visible_seconds + occluded_seconds AS tif FROM visits "
+                        "WHERE exit_ts IS NOT NULL"
+                    ).fetchall()
+                    if rows:
+                        vals = []
+                        for r in rows:
+                            d = _as_dict(r) if not isinstance(r, tuple) else None
+                            vals.append(float((d["tif"] if d else r[0]) or 0))
+                        avg_tif = round(sum(vals) / len(vals), 1)
+                    open_row = con.execute(
+                        "SELECT COUNT(*) AS c FROM visits WHERE exit_ts IS NULL").fetchone()
+                    open_n = int(_as_dict(open_row)["c"] if isinstance(open_row, dict)
+                                 or hasattr(open_row, "keys") else open_row[0])
+                    inside = max(inside, int(open_n))
+                    hidden_now = max(0, int(open_n) - sum(
+                        1 for s in stats.values() if s["inside"] and s.get("entry_ts")))
+            except Exception:  # noqa: BLE001
+                pass
         return {
             "unique_visitors": len(faces),
             "total_entries": entries,
             "total_exits": len(events) - entries,
-            "currently_inside": sum(1 for s in stats.values() if s["inside"]),
+            "currently_inside": inside,
+            "hidden_now": hidden_now,
             "returning_visitors": sum(1 for f in faces if f["visit_count"] > 1),
             "avg_dwell_seconds": round(sum(dwell) / len(dwell), 1) if dwell else None,
+            "avg_time_in_frame_seconds": avg_tif if avg_tif is not None else (
+                round(sum(dwell) / len(dwell), 1) if dwell else None),
             "peak_occupancy": peak,
             "first_event": events[0]["timestamp"] if events else None,
             "last_event": events[-1]["timestamp"] if events else None,
@@ -209,6 +474,17 @@ def create_app(db_path: str, log_dir: str, web_dist: Optional[str] = "web/dist",
     @app.get("/api/away-visitors")
     def away_visitors(limit: int = Query(40, ge=1, le=200)):
         rows = []
+        last_evt: dict = {}
+        if db.exists():
+            try:
+                with connect() as con:
+                    for er in con.execute(
+                        "SELECT away_id, event_type FROM away_events ORDER BY id"
+                    ):
+                        d = _as_dict(er)
+                        last_evt[int(d["away_id"])] = d["event_type"]
+            except Exception:  # noqa: BLE001
+                pass
         for r in _away_rows()[:limit]:
             appearance = None
             raw = r.get("appearance_json")
@@ -217,14 +493,22 @@ def create_app(db_path: str, log_dir: str, web_dist: Optional[str] = "web/dist",
                     appearance = json.loads(raw)
                 except (TypeError, ValueError):
                     appearance = None
+            evidence = None
+            if appearance and isinstance(appearance, dict):
+                evidence = appearance.get("evidence_image")
+            aid = int(r["away_id"])
+            status = "inside" if last_evt.get(aid) == "entry" else "left"
             rows.append({
-                "away_id": r["away_id"],
+                "away_id": aid,
                 "first_seen": r["first_seen"],
                 "last_seen": r["last_seen"],
                 "visit_count": r["visit_count"],
+                "status": status,
                 "appearance_summary": r.get("appearance_summary"),
                 "appearance": appearance,
+                "appearance_image": media(evidence or r.get("image_path")),
                 "thumbnail": media(r.get("image_path")),
+                "linked_face_id": r.get("linked_face_id"),
             })
         return rows
 
@@ -264,12 +548,14 @@ def create_app(db_path: str, log_dir: str, web_dist: Optional[str] = "web/dist",
         evs = [{"id": e["id"], "event_type": e["event_type"], "timestamp": e["timestamp"],
                 "image": media(e["image_path"]), "note": e["note"]}
                for e in events if e["face_id"] == face_id]
-        return {**visitor_row(f, stats[face_id]), "events": evs}
+        row = visitor_row(f, stats[face_id])
+        metrics = _visit_metrics(face_id)
+        return {**row, "events": evs, "visits": metrics["visits"]}
 
     @app.get("/api/events")
     def list_events(type: Optional[str] = Query(None, pattern="^(entry|exit)$"),
                     face_id: Optional[int] = None, limit: int = Query(25, ge=1, le=200), offset: int = 0):
-        if not Path(db_path).exists():
+        if not db.exists():
             return {"total": 0, "items": []}
         where, params = [], []
         if type:
@@ -278,26 +564,34 @@ def create_app(db_path: str, log_dir: str, web_dist: Optional[str] = "web/dist",
             where.append("face_id=?"); params.append(face_id)
         clause = ("WHERE " + " AND ".join(where)) if where else ""
         with connect() as con:
-            total = con.execute(f"SELECT COUNT(*) FROM events {clause}", params).fetchone()[0]
-            rows = con.execute(f"SELECT * FROM events {clause} ORDER BY timestamp DESC, id DESC LIMIT ? OFFSET ?",
-                               params + [limit, offset]).fetchall()
-        items = [{"id": r["id"], "face_id": r["face_id"], "event_type": r["event_type"],
-                  "timestamp": r["timestamp"], "image": media(r["image_path"]),
-                  "track_id": r["track_id"], "frame_idx": r["frame_idx"], "note": r["note"]} for r in rows]
+            total_row = con.execute(f"SELECT COUNT(*) AS c FROM events {clause}", params).fetchone()
+            total = int(_as_dict(total_row)["c"] if isinstance(total_row, dict)
+                        or hasattr(total_row, "keys") else total_row[0])
+            rows = con.execute(
+                f"SELECT * FROM events {clause} ORDER BY timestamp DESC, id DESC LIMIT ? OFFSET ?",
+                list(params) + [limit, offset]).fetchall()
+        items = []
+        for r in rows:
+            d = _as_dict(r)
+            items.append({"id": d["id"], "face_id": d["face_id"], "event_type": d["event_type"],
+                          "timestamp": d["timestamp"], "image": media(d["image_path"]),
+                          "track_id": d["track_id"], "frame_idx": d["frame_idx"], "note": d["note"]})
         return {"total": total, "items": items}
 
     @app.get("/api/visitors/{face_id}/embeddings")
     def visitor_embeddings(face_id: int):
-        if not Path(db_path).exists():
+        if not db.exists():
             raise HTTPException(404, "No database yet")
         with connect() as con:
-            rows = con.execute("SELECT id, face_id, vector, created_at, image_path FROM embeddings ORDER BY id").fetchall()
-            face_imgs = {r["face_id"]: r["image_path"] for r in con.execute("SELECT face_id, image_path FROM faces")}
+            rows = [_as_dict(r) for r in con.execute(
+                "SELECT id, face_id, vector, created_at, image_path FROM embeddings ORDER BY id")]
+            face_imgs = {r["face_id"]: r["image_path"] for r in (
+                _as_dict(x) for x in con.execute("SELECT face_id, image_path FROM faces"))}
         if face_id not in face_imgs:
             raise HTTPException(404, "Visitor not found")
         by = defaultdict(list)
         for r in rows:
-            by[r["face_id"]].append((r, np.frombuffer(r["vector"], dtype=np.float32)))
+            by[r["face_id"]].append((r, np.frombuffer(_blob(r["vector"]), dtype=np.float32)))
 
         def unit(v: np.ndarray) -> np.ndarray:
             return v / max(float(np.linalg.norm(v)), 1e-9)
@@ -326,16 +620,19 @@ def create_app(db_path: str, log_dir: str, web_dist: Optional[str] = "web/dist",
 
     @app.get("/api/logs")
     def logs_tail(limit: int = Query(300, ge=1, le=2000), event: Optional[str] = None,
-                  level: Optional[str] = None, q: Optional[str] = None):
-        """Parsed tail of events.log, newest first."""
-        if not log_file.exists():
-            return {"path": str(log_file), "exists": False, "total": 0, "counts": {}, "items": []}
-        size = log_file.stat().st_size
-        with open(log_file, "rb") as f:
+                  level: Optional[str] = None, q: Optional[str] = None,
+                  source: str = Query("events", pattern="^(events|away)$")):
+        """Parsed tail of events.log (default) or away_events.log, newest first."""
+        target = log_file if source != "away" else (logs / "away_events.log")
+        if not target.exists():
+            return {"path": str(target), "exists": False, "source": source,
+                    "total": 0, "counts": {}, "items": []}
+        size = target.stat().st_size
+        with open(target, "rb") as f:
             f.seek(max(0, size - 2_000_000))
             lines = f.read().decode("utf-8", errors="replace").splitlines()
         if size > 2_000_000:
-            lines = lines[1:]                      # first line may be cut in half
+            lines = lines[1:]
         parsed = []
         for line in lines:
             m = LOG_RE.match(line)
@@ -349,8 +646,42 @@ def create_app(db_path: str, log_dir: str, web_dist: Optional[str] = "web/dist",
         items = [p for p in reversed(parsed)
                  if (not event or p["event"] == event) and (not level or p["level"] == level)
                  and (not needle or needle in (p["event"] + " " + p["message"]).lower())]
-        return {"path": str(log_file), "exists": True, "total": len(items), "counts": dict(counts),
-                "items": items[:limit]}
+        return {"path": str(target), "exists": True, "source": source,
+                "total": len(items), "counts": dict(counts), "items": items[:limit]}
+
+    # Optional Groq analytics assistant (read-only tools over AnalyticsService).
+    try:
+        from api.assistant import create_assistant_router
+        from api.services import AnalyticsService
+        cfg_summary = {
+            "match_threshold": match_threshold,
+            "detection_skip_frames": None,
+            "backend": getattr(db, "backend", None),
+        }
+        try:
+            from src.config import load_config as _lc
+            _cfg = _lc(os.environ.get("TRACKER_CONFIG", "config.json"))
+            cfg_summary.update({
+                "detection_skip_frames": _cfg.get("detection_skip_frames"),
+                "max_lost_frames": _cfg.get("tracker", {}).get("max_lost_frames"),
+                "min_face_px": _cfg.get("quality", {}).get("min_face_px"),
+                "min_blur_var": _cfg.get("quality", {}).get("min_blur_var"),
+                "min_hits": _cfg.get("tracker", {}).get("min_hits"),
+                "iou_threshold": _cfg.get("tracker", {}).get("iou_threshold"),
+                "exit_grace_seconds": _cfg.get("presence", {}).get("exit_grace_seconds"),
+                "edge_exit_grace_seconds": _cfg.get("presence", {}).get("edge_exit_grace_seconds"),
+                "stationary_grace_seconds": _cfg.get("presence", {}).get("stationary_grace_seconds"),
+                "backend": _cfg.get("storage", {}).get("backend") or cfg_summary.get("backend"),
+            })
+        except Exception:  # noqa: BLE001
+            pass
+        analytics = AnalyticsService(
+            db, logs, events_log=str(log_file),
+            match_threshold=match_threshold, config_summary=cfg_summary)
+        app.include_router(create_assistant_router(analytics))
+    except Exception as exc:  # noqa: BLE001
+        import logging as _logging
+        _logging.getLogger(__name__).warning("Assistant router not mounted: %s", exc)
 
     app.mount("/media", StaticFiles(directory=str(logs)), name="media")
     if web_dist and Path(web_dist).is_dir():
@@ -359,15 +690,53 @@ def create_app(db_path: str, log_dir: str, web_dist: Optional[str] = "web/dist",
 
 
 def _default_app() -> FastAPI:
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except Exception:  # noqa: BLE001
+        pass
     from src.config import load_config
+    from src.db_bootstrap import DatabaseError, open_database, redact_secrets
     cfg = load_config(os.environ.get("TRACKER_CONFIG", "config.json"))
     log_dir = os.environ.get("TRACKER_LOG_DIR", cfg["storage"]["log_dir"])
     default_log = cfg["storage"]["events_log"] if "TRACKER_LOG_DIR" not in os.environ else str(Path(log_dir) / "events.log")
-    return create_app(os.environ.get("TRACKER_DB", cfg["storage"]["db_path"]), log_dir,
-                      events_log=os.environ.get("TRACKER_EVENTS_LOG", default_log),
-                      match_threshold=cfg["recognition"]["match_threshold"],
-                      live_preview=os.environ.get(
-                          "TRACKER_LIVE", cfg["output"].get("live_preview", "output/live.jpg")))
+    # DATABASE_URL / TRACKER_DSN required — see src.db_bootstrap.open_database.
+    storage = dict(cfg["storage"])
+    db, db_info = open_database(storage, reset=False)
+    app = create_app(db=db, log_dir=log_dir,
+                     events_log=os.environ.get("TRACKER_EVENTS_LOG", default_log),
+                     match_threshold=cfg["recognition"]["match_threshold"],
+                     live_preview=os.environ.get(
+                         "TRACKER_LIVE", cfg["output"].get("live_preview", "output/live.jpg")))
+    app.state.db_bootstrap = db_info  # type: ignore[attr-defined]
+    return app
 
 
-app = _default_app()
+try:
+    app = _default_app()
+except Exception as _exc:  # noqa: BLE001
+    # Keep `from api.server import create_app` working in tests / offline shells.
+    # uvicorn api.server:app will serve a hard-fail health until DATABASE_URL works.
+    import logging as _logging
+    from src.db_bootstrap import redact_secrets
+    _err = redact_secrets(str(_exc))
+    _logging.getLogger(__name__).error("Postgres required — connect DB: %s", _err)
+    app = FastAPI(title="Face Tracker Analytics API (db unavailable)")
+
+    @app.get("/api/health")
+    def _offline_health():
+        return {
+            "ok": False,
+            "db_exists": False,
+            "backend": None,
+            "fallback": False,
+            "error": f"Connect local Postgres: {_err}",
+        }
+
+    @app.api_route("/api/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
+    def _offline_api(path: str):
+        from fastapi import HTTPException
+        raise HTTPException(
+            status_code=503,
+            detail=f"Database not connected. Set DATABASE_URL (local Postgres). {_err}",
+        )

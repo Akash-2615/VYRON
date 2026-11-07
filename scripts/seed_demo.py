@@ -2,7 +2,8 @@
 previewed without running the models.  Writes to demo/ only - never touches your real DB/logs.
 
     python scripts/seed_demo.py
-    TRACKER_DB=demo/visitors.db TRACKER_LOG_DIR=demo/logs uvicorn api.server:app --port 8000
+    # Demo still uses a local SQLite file under demo/ for offline UI preview only.
+    # Runtime API/tracker require DATABASE_URL (local Postgres).
 """
 import random
 import sys

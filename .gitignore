@@ -5,6 +5,7 @@ __pycache__/
 venv/
 .env
 .env.*
+!.env.example
 
 # models & weights
 models/*.pt
@@ -19,6 +20,7 @@ logs/
 demo/
 output/
 samples/*.csv
+.golden/
 
 # video dataset (too large for git)
 Video Datasets/

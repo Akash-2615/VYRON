@@ -23,6 +23,8 @@ def test_db_appearance_columns(tmp_path):
     db = Database(str(tmp_path / "a.db"), reset=True)
     fid = db.add_face("2026-11-06T10:00:00.000")
     assert db.get_appearance_summary(fid) is None
-    db.set_appearance(fid, "blue top, jeans", '{"summary":"blue top, jeans"}')
+    db.set_appearance(fid, "blue top, jeans", '{"summary":"blue top, jeans"}',
+                      image_path="logs/appearance/x.jpg")
     assert db.get_appearance_summary(fid) == "blue top, jeans"
+    assert db.get_appearance_image(fid) == "logs/appearance/x.jpg"
     db.close()

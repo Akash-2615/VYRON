@@ -47,10 +47,14 @@ export default function Visitors({ paused, onSelectVisitor }: { paused: boolean;
               <div className="visitor-info">
                 <div className="visitor-top">
                   <b>Visitor #{v.face_id}</b>
-                  <Badge kind={v.status}>{v.status === "inside" ? "Inside" : "Left"}</Badge>
+                  <span className="visitor-badges">
+                    <Badge kind={v.status}>{v.status === "inside" ? "Inside" : "Left"}</Badge>
+                    {v.hidden_now && <Badge kind="left">Hidden</Badge>}
+                  </span>
                 </div>
-                <div className="muted small">
-                  {v.visit_count} visit{v.visit_count === 1 ? "" : "s"} · {fmtDuration(v.total_dwell_seconds)} total
+                <div className="muted small" title="Time in frame includes brief occlusions; Visible is detected time only">
+                  {v.visit_count} visit{v.visit_count === 1 ? "" : "s"} · {fmtDuration(v.time_in_frame_seconds ?? v.total_dwell_seconds)} in frame
+                  {v.visible_seconds != null && <> · {fmtDuration(v.visible_seconds)} visible</>}
                 </div>
                 {v.appearance_summary && (
                   <div className="appearance-line" title={v.appearance_summary}>{v.appearance_summary}</div>

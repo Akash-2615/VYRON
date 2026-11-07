@@ -1,11 +1,11 @@
 import { ReactNode, useState } from "react";
 import { User } from "lucide-react";
 
-export function Card({ title, action, children, className = "" }: {
-  title?: string; action?: ReactNode; children: ReactNode; className?: string;
+export function Card({ title, action, children, className = "", id }: {
+  title?: string; action?: ReactNode; children: ReactNode; className?: string; id?: string;
 }) {
   return (
-    <section className={`card ${className}`}>
+    <section className={`card ${className}`} id={id}>
       {title && (
         <header className="card-head">
           <h3>{title}</h3>

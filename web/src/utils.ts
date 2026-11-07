@@ -15,8 +15,13 @@ export const fmtDateTime = (iso: string | null) =>
 
 export function axisLabel(iso: string, bucketSeconds: number): string {
   const d = new Date(iso);
-  if (bucketSeconds < 60) return d.toLocaleTimeString([], { minute: "2-digit", second: "2-digit" });
-  if (bucketSeconds < 86400) return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  // Always include the hour — minute:second alone looks like HH:MM (e.g. 08:34 at 00:08:34).
+  if (bucketSeconds < 60) {
+    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  }
+  if (bucketSeconds < 86400) {
+    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  }
   return d.toLocaleDateString([], { month: "short", day: "numeric" });
 }
 

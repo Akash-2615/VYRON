@@ -51,16 +51,23 @@ class FrameSource:
         retries = 0
         max_retries = int(self.cfg["max_reconnects"])
         delay = float(self.cfg["reconnect_delay_sec"])
+        self.last_gap_sec: float = 0.0
+        self._gap_started: Optional[float] = None
         while not self._stop.is_set():
             ok, frame = (False, None)
             if self._cap is not None and self._cap.isOpened():
                 ok, frame = self._cap.read()
             if ok:
+                if self._gap_started is not None:
+                    self.last_gap_sec = time.time() - self._gap_started
+                    self._gap_started = None
                 retries = 0
                 with self._cond:
                     self._frame, self._seq = frame, self._seq + 1
                     self._cond.notify_all()
                 continue
+            if self._gap_started is None:
+                self._gap_started = time.time()
             retries += 1
             if max_retries and retries > max_retries:
                 log.error("Giving up on stream after %d reconnect attempts", retries - 1)
@@ -84,11 +91,16 @@ class FrameSource:
                 remaining = end - time.time()
                 if remaining <= 0 or self._stop.is_set():
                     return False, None
-                self._cond.wait(timeout=min(remaining, 0.5))
+                self._cond.wait(timeout=min(remaining, 0.25))
             if self._seq == self._last_seq:
                 return False, None
+            # Always take the newest frame (reader overwrites while we process).
             self._last_seq = self._seq
-            return True, self._frame.copy()
+            frame = self._frame
+            if frame is None:
+                return False, None
+            # Copy: OpenCV may reuse the capture buffer on the next grab.
+            return True, frame.copy()
 
     def release(self) -> None:
         self._stop.set()

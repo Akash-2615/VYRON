@@ -6,4 +6,5 @@ insightface>=0.7.3
 onnxruntime>=1.16        # use onnxruntime-gpu instead if you have an NVIDIA GPU
 open-clip-torch>=2.24     # clothing / appearance attributes (OpenCLIP ViT-B-32)
 Pillow>=10.0
+psycopg[binary]>=3.1      # PostgreSQL (default storage backend)
 pytest>=7.0

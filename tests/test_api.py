@@ -57,3 +57,24 @@ def test_api_embeddings_and_logs(tmp_path):
     assert c.get("/api/logs?level=WARNING").json()["total"] == 1
     assert c.get("/api/logs?event=ENTRY").json()["total"] == 1
     assert c.get("/api/logs?q=duplicate").json()["total"] == 1
+
+
+def test_api_tracker_start_validates_rtsp(tmp_path):
+    db = Database(str(tmp_path / "t.db"), reset=True)
+    db.close()
+    c = TestClient(create_app(str(tmp_path / "t.db"), str(tmp_path / "logs"), web_dist=None))
+    assert c.get("/api/tracker/status").json()["running"] is False
+    bad = c.post("/api/tracker/start", json={"url": "http://not-rtsp"})
+    assert bad.status_code == 400
+    empty = c.post("/api/tracker/start", json={"url": ""})
+    assert empty.status_code == 400
+    missing = c.post("/api/tracker/start", json={"url": str(tmp_path / "nope.mp4"), "mode": "local"})
+    assert missing.status_code == 400
+    vids = c.get("/api/videos")
+    assert vids.status_code == 200
+    assert "items" in vids.json()
+    empty_all = c.post("/api/tracker/start", json={"mode": "local", "playlist": "all"})
+    # May 400 if no configured files exist in this sandbox — either is fine as long as not 405/500
+    assert empty_all.status_code in (200, 400, 409)
+    bad_cam = c.post("/api/tracker/start", json={"mode": "webcam", "url": "cam"})
+    assert bad_cam.status_code == 400

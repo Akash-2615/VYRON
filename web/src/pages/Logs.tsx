@@ -10,14 +10,31 @@ export default function Logs({ paused, onSelectVisitor }: { paused: boolean; onS
   const [level, setLevel] = useState("");
   const [q, setQ] = useState("");
   const [limit, setLimit] = useState(300);
-  const { data, error } = usePolling(() => api2.logs(limit, event, level, q), [event, level, q, limit], 3000, paused);
+  const [source, setSource] = useState<"events" | "away">("events");
+  const { data, error } = usePolling(
+    () => api2.logs(limit, event, level, q, source),
+    [event, level, q, limit, source],
+    3000,
+    paused,
+  );
   const counts = Object.entries(data?.counts ?? {}).sort((a, b) => b[1] - a[1]);
 
   return (
     <Card
-      title="events.log"
+      title={source === "away" ? "away_events.log" : "events.log"}
       action={
         <div className="toolbar">
+          <select
+            value={source}
+            onChange={(e) => {
+              setSource(e.target.value as "events" | "away");
+              setEvent("");
+            }}
+            aria-label="Log source"
+          >
+            <option value="events">events.log</option>
+            <option value="away">away_events.log</option>
+          </select>
           <label className="search"><Search size={15} /><input placeholder="Search log" value={q} onChange={(e) => setQ(e.target.value)} /></label>
           <select value={level} onChange={(e) => setLevel(e.target.value)}>
             <option value="">All levels</option><option value="INFO">INFO</option><option value="WARNING">WARNING</option><option value="ERROR">ERROR</option>
