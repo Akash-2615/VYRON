@@ -4,7 +4,8 @@
 Allowed edges (lower must not import higher):
   core <- storage, event_logging <- detection, recognition, tracking, video_io
        <- presence <- pipeline <- main/scripts
-  api/routers -> api/services -> storage/reporting
+  api/server + api/services + api/assistant -> storage/reporting
+  (api/routers is a docs-only route map; handlers stay in server.py)
   Nothing in src/ imports api/ or scripts/.
 
 Exit 0 if clean; exit 1 with violations listed.

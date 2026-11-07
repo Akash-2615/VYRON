@@ -91,15 +91,16 @@ def body_box(face_box, frame_shape) -> Optional[Tuple[int, int, int, int]]:
 
     A face is ~1/7–1/8 of standing height in typical CCTV, so we project a
     tall box downward from the face for clothing / appearance analysis + overlay.
+    Width is kept tight so a neighboring person is less likely to leak in.
     """
     h, w = frame_shape[:2]
     x1, y1, x2, y2 = [float(v) for v in face_box[:4]]
     fh, fw = max(1.0, y2 - y1), max(1.0, x2 - x1)
     cx = (x1 + x2) / 2.0
-    # ~7.5 face-heights tall, slightly above the hairline
-    ny1 = max(0, int(y1 - 0.6 * fh))
-    ny2 = min(h, int(y1 + 7.5 * fh))
-    half = 1.8 * fw
+    # ~6 face-heights tall, slightly above the hairline
+    ny1 = max(0, int(y1 - 0.5 * fh))
+    ny2 = min(h, int(y1 + 6.0 * fh))
+    half = 1.15 * fw
     nx1 = max(0, int(cx - half))
     nx2 = min(w, int(cx + half))
     if nx2 - nx1 < 8 or ny2 - ny1 < 8:
@@ -107,9 +108,33 @@ def body_box(face_box, frame_shape) -> Optional[Tuple[int, int, int, int]]:
     return nx1, ny1, nx2, ny2
 
 
-def body_crop(frame: np.ndarray, face_box) -> Optional[np.ndarray]:
+def person_box_for_face(face_box, frame_shape,
+                        person_dets=None) -> Optional[Tuple[int, int, int, int]]:
+    """Prefer the smallest person-detector box that contains the face centre.
+
+    Falls back to the heuristic ``body_box`` when no containing person box exists.
+    Using the smallest containing box avoids grabbing a larger overlapping neighbour.
+    """
+    if person_dets is not None and len(person_dets):
+        fx1, fy1, fx2, fy2 = [float(v) for v in face_box[:4]]
+        fcx, fcy = (fx1 + fx2) * 0.5, (fy1 + fy2) * 0.5
+        best: Optional[Tuple[int, int, int, int]] = None
+        best_area: Optional[float] = None
+        for d in person_dets:
+            x1, y1, x2, y2 = [float(v) for v in d[:4]]
+            if x1 <= fcx <= x2 and y1 <= fcy <= y2:
+                area = max(1.0, (x2 - x1) * (y2 - y1))
+                if best is None or area < best_area:
+                    best = (int(x1), int(y1), int(x2), int(y2))
+                    best_area = area
+        if best is not None:
+            return best
+    return body_box(face_box, frame_shape)
+
+
+def body_crop(frame: np.ndarray, face_box, person_dets=None) -> Optional[np.ndarray]:
     """Expand a face box downward/sideways to capture torso + clothing."""
-    box = body_box(face_box, frame.shape)
+    box = person_box_for_face(face_box, frame.shape, person_dets=person_dets)
     if box is None:
         return None
     x1, y1, x2, y2 = box

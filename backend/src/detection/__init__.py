@@ -9,3 +9,5 @@ __all__ = [
     "YoloPersonDetector",
     "RetinaFaceDetector",
 ]
+
+# preprocess is imported by callers that need it (lazy-friendly; no heavy deps).

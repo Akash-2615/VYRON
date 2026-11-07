@@ -85,7 +85,7 @@ def _start_dashboard(cfg: dict) -> Optional[subprocess.Popen]:
 
 
 def _open_db(storage: dict, reset: bool):
-    from src.db_bootstrap import open_database
+    from src.storage import open_database
     db, info = open_database(storage, reset=reset)
     print(f"Database: {db.backend}")
     db._bootstrap_info = info  # type: ignore[attr-defined]
@@ -119,9 +119,9 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s | %(levelname)s | %(message)s")
 
-    from src.config import load_config
+    from src.core.config import load_config
     from src.pipeline import FaceTrackingPipeline
-    from src.session import start_session, stop_session
+    from src.session_svc import start_session, stop_session
     from main import run_source  # reuse the same live processing loop
 
     cfg = load_config(args.config)
@@ -143,7 +143,7 @@ def main() -> int:
     print("  Quit     : press q in the video window, or Ctrl+C")
     print("=" * 60)
 
-    from src.db_bootstrap import log_db_open
+    from src.storage import log_db_open
     st = dict(cfg["storage"])
     reset = bool(st.get("reset_on_start", False)) and not args.no_reset
     db = _open_db(st, reset=reset)
@@ -155,13 +155,13 @@ def main() -> int:
     log_db_open(events, info)
 
     # Load models (same stack as main.py).
-    from src.detector import HybridFaceDetector, YoloFaceDetector
-    from src.recognizer import FaceEmbedder
+    from src.detection import HybridFaceDetector, YoloFaceDetector
+    from src.recognition import FaceEmbedder
 
     appearance = None
     if cfg.get("appearance", {}).get("enabled", False):
         try:
-            from src.appearance import AppearanceAnalyzer
+            from src.recognition import AppearanceAnalyzer
             appearance = AppearanceAnalyzer(cfg["appearance"])
         except Exception:  # noqa: BLE001
             logging.exception("Appearance model failed; continuing")
@@ -169,7 +169,7 @@ def main() -> int:
     person_detector = None
     if cfg.get("away_walkers", {}).get("enabled", False):
         try:
-            from src.person_detector import YoloPersonDetector
+            from src.detection import YoloPersonDetector
             person_detector = YoloPersonDetector(cfg.get("person_detector", {}))
         except Exception:  # noqa: BLE001
             logging.exception("Person detector failed; continuing")

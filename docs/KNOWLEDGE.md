@@ -28,7 +28,8 @@ dashboard has not been viewed in a browser** (type-check and production build pa
 | Unique count (`SELECT COUNT(*) FROM faces`) | Built, tested |
 | Multi-video session with one combined unique count (`--sources a.mp4 b.mp4`) | Built, unit-tested |
 | RTSP (TCP, threaded latest-frame reader, auto-reconnect) | Built; live path unit-tested; interview runner `run_rtsp.py` (paste URL only) |
-| FastAPI read-only API + React/TS dashboard (Overview, Visitors w/ Face & Embedding tab, Event Log, System Log) | Built; demo data via `scripts/seed_demo.py` |
+| FastAPI API + React/TS dashboard (Overview, Visitors w/ Face & Embedding tab, Event Log, System Log) | Built; demo data via `scripts/seed_demo.py`. **Read-only except** `PUT/POST /api/preprocess*` which may write only `data/runtime/preprocess.json` (never the DB). |
+| Optional video preprocess (dull/dark/noisy assist for detector only) | Built; OFF by default; async; originals used for crops/preview/away/disturbance |
 | README with architecture diagram, planning doc, compute estimates | Written; has placeholders (video link, sample output) |
 
 ## 3. Repository map
@@ -96,9 +97,10 @@ Old imports (`from src.database import Database`, etc.) still work via shims; ru
 - **Single clock source:** all `events.timestamp` / `last_seen` / image folder dates / ENTRY·EXIT `ts=` come from wall clock (ISO-ms). Monotonic is durations-only.
 - **Every log line has `sid=<session_id>`** (first key=value). When `reset_on_start` / `--fresh`, archive prior `events.log` (+ `away_events.log`) so the log and DB describe the same session; exactly one `SYSTEM_STOP` per start.
 - **Crash recovery** (`reset_on_start=false` / `--no-reset`): each leftover open visit gets **one EXIT** at `faces.last_seen` with `reason=crash_recovery` (+ `SESSION_RECOVERED`). Never invent a synthetic ENTRY.
-- `events.log` must contain: TRACK_STARTED/ENDED (paired), EMBEDDING_GENERATED, FACE_REGISTERED (`face_id`,`unique_total`,`track`), FACE_RECOGNIZED, ENTRY, EXIT, COUNT_SNAPSHOT; STREAM_END carries `new_faces`/`unique_so_far`. AWAY_* live in `away_events.log`.
+- `events.log` must contain: TRACK_STARTED/ENDED (paired), EMBEDDING_GENERATED, FACE_REGISTERED (`face_id`,`unique_total`,`track`), FACE_RECOGNIZED, ENTRY (`entry_kind=new|re_entry`) plus companion NEW_ENTRY / RE_ENTRY, EXIT, COUNT_SNAPSHOT; STREAM_END carries `new_faces`/`unique_so_far`. AWAY_* live in `away_events.log`. Unique counting still keys off ENTRY/EXIT + `faces` rows — NEW_ENTRY/RE_ENTRY are audit labels only.
 - Heavy imports (ultralytics, insightface) stay inside `main.py`/detector/recognizer so tests run without models (dependency injection into the pipeline).
 - DB writes stay commit-per-write (resilience to interruption).
+- **Optional preprocess (OFF by default):** enhanced frames may feed **only** the face detector (and optional blur-gate `quality_assist`). Embeddings, crops, annotated/live preview, away/person inputs, and disturbance/brightness-jump stats always use the **original** frame. When disabled, the detector path is a no-op (byte-identical to pre-feature). The API remains read-only except `PUT/POST /api/preprocess*`, which may write only `data/runtime/preprocess.json` (never the DB).
 
 ## 5. Config (`config.json`) — keys and meaning
 `video_source` / `video_sources[]`; `detection_skip_frames` (N = skip N frames between YOLO runs);
@@ -129,7 +131,8 @@ Runtime requires **local Postgres**: `docker compose up -d db`, then set `DATABA
 ## 7. API (`backend/api/server.py`, run from repo root: `uvicorn api.server:app --app-dir backend --port 8000`)
 `GET /api/health, /api/summary, /api/count?session=latest, /api/timeline, /api/visitors, /api/visitors/{id}, /api/visitors/{id}/embeddings, /api/events?type=&face_id=&limit=&offset=, /api/logs?limit=&event=&level=&q=&source=events|away, /api/tracker/status, /api/assistant/status`;
 `POST /api/tracker/start` `{url, reset?}`, `POST /api/tracker/stop` — dashboard RTSP job (background YOLO+InsightFace pipeline);
-`POST /api/assistant/chat` — optional Groq SSE assistant (tools via `api/services.py` + `api/assistant_tools.py`); disabled/503 without `GROQ_API_KEY`.
+`POST /api/assistant/chat` — optional Groq SSE **ARIA** assistant (tools via `api/services.py` + `api/assistant_tools.py`); disabled/503 without `GROQ_API_KEY`.
+ARIA rules: **read-only** (never changes settings/data/tracker); tool results carry preformatted fields + `plain_summary`; live snapshot injected every turn; inline tags / nav actions are **server-validated whitelists** only; no images/embeddings sent to Groq.
 images under `/media/...` (from `logs/`); serves `frontend/dist` at `/` if built. Read-only connections. Image paths in the DB are
 relative to `PROJECT_ROOT` (forward slashes). Env overrides: `TRACKER_CONFIG`, `DATABASE_URL` / `TRACKER_DSN` (required Postgres), `TRACKER_LOG_DIR`, `TRACKER_EVENTS_LOG`, `GROQ_API_KEY`, `GROQ_MODEL`, `ASSISTANT_ENABLED`.
 DB open path: `src/db_bootstrap.open_database` — Postgres only; missing/unreachable → `DatabaseError` + `/api/health` `ok=false` (secrets redacted). Logs `DB_BACKEND backend=postgres` (never `DB_FALLBACK`).

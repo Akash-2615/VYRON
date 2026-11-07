@@ -13,12 +13,11 @@ from pathlib import Path
 
 import cv2
 
-from src.config import load_config
+from src.core.config import load_config
 from src.pipeline import FaceTrackingPipeline
-from src.session import start_session, stop_session
-from src.stream import FrameSource
-from src.preview import default_publisher, publish_live_stats
-from src.visualize import draw_overlay
+from src.session_svc import start_session, stop_session
+from src.video_io import FrameSource, default_publisher, publish_live_stats
+from src.viz import draw_overlay
 
 
 def parse_args():
@@ -93,6 +92,21 @@ def run_source(source, cfg, pipeline, db, events, stop, display, max_frames, out
     last_read_wall = time.time()
     end_reason = "eof"
 
+    # Optional preprocess (detector input only). OFF => identical path to before.
+    from src.detection.preprocess import get_preprocess_runtime, PreprocessSettings
+    pp_rt = get_preprocess_runtime()
+    pp_rt.store.set_base_from_config(cfg.get("preprocess"))
+    pp_rt.start_worker()
+    pp0 = pp_rt.store.get()
+    events.log("PREPROCESS_ENABLED",
+               enabled=bool(pp0.enabled), mode=pp0.mode,
+               detector_res=bool(pp0.process_at_detector_resolution),
+               version=pp0.version)
+    det_imgsz = int((cfg.get("detector") or {}).get("imgsz") or 640)
+    pp_fallback = 0
+    pp_ms_avg = 0.0
+    pp_ready = 100.0
+
     def _count_snapshot(**extra):
         counts = db.event_counts()
         events.log(
@@ -114,9 +128,40 @@ def run_source(source, cfg, pipeline, db, events, stop, display, max_frames, out
             if not ok:
                 end_reason = "disconnect" if src.is_live else "eof"
                 break
+            # Downscale 4K/CCTV before YOLO so live FPS stays usable.
+            proc_w = int((cfg.get("stream") or {}).get("process_max_width", 0) or 0)
+            if proc_w > 0 and frame.shape[1] > proc_w:
+                scale = proc_w / float(frame.shape[1])
+                frame = cv2.resize(frame, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+
+            # Preprocess for detector only (never blocks live; file may wait max_wait_ms).
+            detect_frame = None
+            detect_scale = 1.0
+            pp = pp_rt.store.get()
+            pipeline._preprocess_settings = pp  # quality_assist reads this
+            run_det = idx % (int(cfg.get("detection_skip_frames", 0)) + 1) == 0
+            if pp.enabled and pp.any_step_on() and run_det:
+                if pp.mode == "sync":
+                    detect_frame, detect_scale, _gate = pp_rt.enhance_sync(
+                        frame, pp, detector_imgsz=det_imgsz)
+                else:
+                    pp_rt.submit(idx, frame, pp, det_imgsz)
+                    wait_ms = 0.0 if src.is_live else float(pp.max_wait_ms)
+                    hit = pp_rt.take(idx, wait_ms=wait_ms)
+                    if hit is None:
+                        pp_rt.note_fallback()
+                        pp_fallback += 1
+                    else:
+                        detect_frame, detect_scale, _gate = hit
+                m = pp_rt.metrics
+                pp_ms_avg = float(m.get("total_avg_ms") or 0.0)
+                pp_ready = float(m.get("ready_pct") or 100.0)
+
             try:
                 # Wall-clock processing time for files and live (mono used only for durations).
-                tracks, away_tracks = pipeline.process_frame(frame, idx, ts=None)
+                tracks, away_tracks = pipeline.process_frame(
+                    frame, idx, ts=None,
+                    detect_frame=detect_frame, detect_scale=detect_scale)
             except Exception:                      # keep running on a bad frame
                 logging.exception("Frame %d failed", idx)
                 idx += 1
@@ -127,9 +172,15 @@ def run_source(source, cfg, pipeline, db, events, stop, display, max_frames, out
                 unique_cached = db.unique_count()
                 away_cached = db.away_stats().get("away_unique", 0)
             if idx % 300 == 0:
-                events.log("STATS", source=source, frames=idx, fps=f"{fps:.1f}",
-                           unique=unique_cached, away=away_cached, skipped=skipped,
-                           away_summary=events.away_summary().replace(" ", ","))
+                events.log(
+                    "STATS", source=source, frames=idx, fps=f"{fps:.1f}",
+                    unique=unique_cached, away=away_cached, skipped=skipped,
+                    away_summary=events.away_summary().replace(" ", ","),
+                    preprocess=("on" if pp.enabled else "off"),
+                    pp_ms=f"{pp_ms_avg:.1f}",
+                    ready=f"{pp_ready:.0f}",
+                    fallback=pp_fallback,
+                )
                 _count_snapshot(source=source, frames=idx)
 
             # Real-time in-frame counts (cheap; every other frame is enough).
@@ -197,8 +248,8 @@ def run_source(source, cfg, pipeline, db, events, stop, display, max_frames, out
                                 stop["flag"] = True
 
             # Pace to source FPS: sleep when ahead so we never play faster than 1×.
-            # When behind, drop source frames (catch_up_drop) so the dashboard stays
-            # near realtime instead of falling minutes behind on heavy CPU.
+            # Mild catch-up when far behind keeps the live UI near realtime without
+            # skipping entire scenes (hard cap on drops per step).
             if realtime:
                 target = idx * frame_dt
                 elapsed = time.time() - t0
@@ -206,8 +257,8 @@ def run_source(source, cfg, pipeline, db, events, stop, display, max_frames, out
                 if ahead > 0.001:
                     time.sleep(min(ahead, frame_dt * 2))
                 elif (bool((cfg.get("stream") or {}).get("catch_up_drop", True))
-                      and elapsed - target > 0.12 and src._cap is not None):
-                    drop = min(int((elapsed - target) * video_fps) + 1, 120)
+                      and elapsed - target > 1.0 and src._cap is not None):
+                    drop = min(int((elapsed - target) * video_fps * 0.35) + 1, 8)
                     for _ in range(max(0, drop)):
                         if not src._cap.grab():
                             break
@@ -260,7 +311,7 @@ def main() -> int:
     st = cfg["storage"]
     reset = st["reset_on_start"] and not args.no_reset
     if args.fresh:
-        from src.session import prepare_fresh
+        from src.session_svc import prepare_fresh
         report = prepare_fresh(cfg)
         print("--fresh: clean start", flush=True)
         for pth in report.get("archived") or []:
@@ -275,24 +326,32 @@ def main() -> int:
     if args.no_reset and not args.fresh:
         reset = False
     # reset happens ONCE per session, never between videos
-    from src.db_bootstrap import log_db_open, open_database
+    from src.storage import log_db_open, open_database
     db, db_info = open_database(st, reset=reset)  # Postgres only; raises if unavailable
     events = start_session(cfg, db, reset=reset, sources=sources)
     log_db_open(events, db_info)
 
-    from src.detector import HybridFaceDetector, YoloFaceDetector  # heavy imports stay here
-    from src.recognizer import FaceEmbedder
+    from src.detection import HybridFaceDetector, YoloFaceDetector  # heavy imports stay here
+    from src.recognition import FaceEmbedder
     appearance = None
-    if cfg.get("appearance", {}).get("enabled", False):
+    app_cfg = cfg.get("appearance", {}) or {}
+    away_cfg = cfg.get("away_walkers", {}) or {}
+    # Skip loading CLIP when nothing will call describe (saves RAM + startup on crowded runs).
+    need_appearance = bool(app_cfg.get("enabled", False)) and (
+        bool(app_cfg.get("describe_on_register", True))
+        or bool(away_cfg.get("describe_away", False))
+        or bool(away_cfg.get("require_facing_away", False))
+    )
+    if need_appearance:
         try:
-            from src.appearance import AppearanceAnalyzer
-            appearance = AppearanceAnalyzer(cfg["appearance"])
+            from src.recognition import AppearanceAnalyzer
+            appearance = AppearanceAnalyzer(app_cfg)
         except Exception:  # noqa: BLE001
             logging.exception("Appearance model failed to load; continuing without clothing tags")
     person_detector = None
     if cfg.get("away_walkers", {}).get("enabled", False):
         try:
-            from src.person_detector import YoloPersonDetector
+            from src.detection import YoloPersonDetector
             person_detector = YoloPersonDetector(cfg.get("person_detector", {}))
         except Exception:  # noqa: BLE001
             logging.exception("Person detector failed to load; away-walker KPI disabled")

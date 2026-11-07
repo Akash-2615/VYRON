@@ -26,7 +26,33 @@ class YoloPersonDetector:
         self.min_w = int(cfg.get("min_width_px", 20))
         self.min_aspect = float(cfg.get("min_aspect", 1.15))   # h/w — reject flat blobs
         self.max_aspect = float(cfg.get("max_aspect", 5.5))    # reject ultra-thin floor streaks
+        self.nms_iou = float(cfg.get("nms_iou", 0.55))
         log.info("YOLO person detector ready (weights=%s device=%s)", weights, self.device)
+
+    @staticmethod
+    def _nms(dets: np.ndarray, iou_thr: float) -> np.ndarray:
+        """Greedy NMS — crowded hallways otherwise keep overlapping partial bodies."""
+        if len(dets) <= 1:
+            return dets
+        order = np.argsort(-dets[:, 4])
+        keep = []
+        while len(order):
+            i = int(order[0])
+            keep.append(i)
+            if len(order) == 1:
+                break
+            rest = order[1:]
+            xx1 = np.maximum(dets[i, 0], dets[rest, 0])
+            yy1 = np.maximum(dets[i, 1], dets[rest, 1])
+            xx2 = np.minimum(dets[i, 2], dets[rest, 2])
+            yy2 = np.minimum(dets[i, 3], dets[rest, 3])
+            inter = np.clip(xx2 - xx1, 0, None) * np.clip(yy2 - yy1, 0, None)
+            area_i = max(1e-6, (dets[i, 2] - dets[i, 0]) * (dets[i, 3] - dets[i, 1]))
+            area_r = np.maximum(
+                1e-6, (dets[rest, 2] - dets[rest, 0]) * (dets[rest, 3] - dets[rest, 1]))
+            iou = inter / (area_i + area_r - inter)
+            order = rest[iou < iou_thr]
+        return dets[np.asarray(keep, dtype=np.int64)]
 
     def detect(self, frame: np.ndarray) -> np.ndarray:
         res = self.model.predict(
@@ -54,4 +80,4 @@ class YoloPersonDetector:
             keep.append(row)
         if not keep:
             return np.zeros((0, 5), dtype=np.float32)
-        return np.asarray(keep, dtype=np.float32)
+        return self._nms(np.asarray(keep, dtype=np.float32), self.nms_iou)

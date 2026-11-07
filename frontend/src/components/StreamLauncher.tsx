@@ -137,23 +137,25 @@ export default function StreamLauncher({ paused }: { paused: boolean }) {
     ? ` · video ${job.source_index ?? 1}/${job.source_total}`
     : "";
 
-  // While streaming: one status line + Stop (hide the picker chrome).
+  // While streaming: single status row + Stop (hide the picker chrome).
   if (running) {
-    const kind = job?.mode === "local" ? "local video"
+    const kind = job?.mode === "local" ? "file"
       : job?.mode === "webcam" ? "webcam"
         : "RTSP";
     const label = job?.mode === "webcam"
-      ? `device ${job?.url ?? ""}`
+      ? `cam ${job?.url ?? "0"}`
       : PathName(job?.url);
     const via = job?.starting
-      ? "Starting models… live view appears on the first frame."
-      : `Streaming via ${kind}${progress}${label ? ` · ${label}` : ""}${job?.backend ? ` · DB ${job.backend}` : ""}`;
+      ? "Starting models…"
+      : `${kind}${progress}${label ? ` · ${label}` : ""}${job?.backend ? ` · ${job.backend}` : ""}`;
     return (
       <div className="rtsp-launcher stream-launcher stream-launcher-live">
         <div className="rtsp-row stream-live-row">
-          <p className="stream-via" title={via}>{via}</p>
-          <button type="button" className="btn btn-danger" disabled={busy} onClick={() => void onStop()}>
-            <Square size={15} /> Stop
+          <p className="stream-via" title={via}>
+            <span className="stream-via-dot" aria-hidden />Streaming · {via}
+          </p>
+          <button type="button" className="btn btn-danger btn-sm" disabled={busy} onClick={() => void onStop()}>
+            <Square size={14} /> Stop
           </button>
         </div>
         {job?.error && <p className="rtsp-error">{job.error}</p>}

@@ -76,5 +76,5 @@ def test_overlay_draws_outer_person_box():
     face.owns = True
     face.time_since_update = 1  # coasting — person box must still show
     out = draw_overlay(frame.copy(), [face], max_box_age=3)
-    # body_box is a stroke only — sample its left edge below the face.
-    assert out[120, 88].sum() > 0
+    # body_box is a stroke only — sample its left edge below the face (~1.15× face half-width).
+    assert out[120, 114].sum() > 0

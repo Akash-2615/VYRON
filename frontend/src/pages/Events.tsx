@@ -3,7 +3,7 @@ import { ChevronLeft, ChevronRight } from "lucide-react";
 import { api } from "../api";
 import { Badge, Card, Empty, Thumb } from "../components/ui";
 import { usePolling } from "../api";
-import { fmtDateTime } from "../utils";
+import { entryKindLabel, fmtDateTime } from "../utils";
 
 const PAGE_SIZE = 15;
 
@@ -38,7 +38,16 @@ export default function Events({ paused, onSelectVisitor }: { paused: boolean; o
                 <tr key={e.id} className="clickable" onClick={() => onSelectVisitor(e.face_id)}>
                   <td><Thumb src={e.image} size={40} /></td>
                   <td>#{e.face_id}</td>
-                  <td><Badge kind={e.event_type}>{e.event_type === "entry" ? "Entry" : "Exit"}</Badge></td>
+                  <td>
+                    {(() => {
+                      const k = entryKindLabel(e.event_type, e.note);
+                      const badgeKind = k.kind === "exit" ? "exit"
+                        : k.kind === "reentry" ? "reentry"
+                          : k.kind === "new" ? "new"
+                            : "entry";
+                      return <Badge kind={badgeKind}>{k.label}</Badge>;
+                    })()}
+                  </td>
                   <td>{fmtDateTime(e.timestamp)}</td>
                   <td className="muted">{e.track_id ?? "—"}</td>
                   <td className="muted">{e.frame_idx ?? "—"}</td>

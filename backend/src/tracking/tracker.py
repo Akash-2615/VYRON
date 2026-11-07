@@ -64,6 +64,7 @@ class Track:
         self.embed_attempts = 0
         self.cycles_since_attempt = 10 ** 6
         self.pending: list = []
+        self.pending_scores: list = []
         self.last_crop = None
         self.appearance_summary: Optional[str] = None
         self.kind: str = "face"                       # "face" | "away"

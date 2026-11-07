@@ -100,60 +100,51 @@ A read-only web dashboard over the same PostgreSQL DB, image store and `events.l
   with cosine similarity against the match threshold. A second tab shows that visitor's entry/exit timeline.
 - **Event Log** - paginated, filterable entry/exit table with face crops.
 - **System Log** - live, filterable view of `events.log` by default, with a toggle for `away_events.log`; colour-coded, with clickable face IDs.
-- **Assistant** (optional) - right-side chat panel (Ctrl/Cmd+K) powered by Groq. Answers analytics questions via read-only tools (summary, visitors, events, logs, similarities). No raw images or 512-d embeddings are sent to Groq — only aggregated stats, IDs, and short log snippets.
+- **ARIA** (optional) — VYRON’s analytics companion (Ctrl/Cmd+K). Natural-language answers via read-only tools; server-side formatting (durations, %, `plain_summary`); live KPI snapshot each turn; whitelist inline tags (`[[visitor:N]]`, `[[kpis]]`, …) and click-to-run nav chips. **Privacy:** only aggregated stats, anonymous IDs, short log snippets, and face thumbnails served from the *local* API are used in the UI — no images or 512-d embeddings are sent to Groq. Model is configurable via `GROQ_MODEL` (names change). Good questions: “How many unique visitors?”, “Who stayed longest?”, “Why does the count audit mismatch?”, “What does preprocessing do?”, “Any warnings?”.
 
 Data refreshes every 3 s (pause button in the top bar).
 
 ```bash
-pip install -r backend/requirements-api.txt
-cp .env.example .env   # optional: set GROQ_API_KEY for the assistant
-cd frontend && npm install && npm run build && cd .. # one-time build
-uvicorn api.server:app --app-dir backend --port 8000  # -> http://localhost:8000
-# or: make api / make web / make build-web
+make install          # backend pip + frontend npm (one command)
+make db               # local Postgres
+cp .env.example .env  # optional: GROQ_API_KEY for the assistant
+make build-web && make api   # → http://localhost:8000
+# Dev UI: make api  (terminal 1)  +  make web  (terminal 2) → :5173
 ```
-Dev mode with hot reload: run `uvicorn` as above, then `cd frontend && npm run dev` (http://localhost:5173, proxies to :8000).
-The dashboard can run while `main.py` is processing (Postgres allows concurrent readers).
-Without `GROQ_API_KEY` the API and dashboard still start; the assistant panel shows setup instructions. Model names change — check the Groq console and set `GROQ_MODEL` if needed (default `llama-3.3-70b-versatile`).
+Without `GROQ_API_KEY` the API and dashboard still start; the assistant panel shows setup instructions.
 
-No results yet? Preview with clearly fake demo data (written to `demo/`, never touches your real DB):
+No results yet? Preview with fake demo data (`data/demo/`, never touches real logs):
 ```bash
 python backend/scripts/seed_demo.py
-DATABASE_URL=postgresql://… TRACKER_LOG_DIR=data/demo/logs uvicorn api.server:app --app-dir backend --port 8000
+TRACKER_LOG_DIR=data/demo/logs make api
 ```
-Stack: FastAPI (`backend/api/server.py`) -> React 18 + TypeScript + Vite + Recharts (`frontend/`). Endpoints: `/api/summary`, `/api/timeline`,
-`/api/visitors`, `/api/visitors/{id}`, `/api/visitors/{id}/embeddings`, `/api/events`, `/api/logs`, `/api/assistant/*`, `/api/tracker/*`, images under `/media`.
+Stack: FastAPI (`backend/api`) → React + Vite (`frontend/`). Endpoints: `/api/summary`, `/api/timeline`,
+`/api/visitors`, `/api/events`, `/api/logs`, `/api/assistant/*`, `/api/tracker/*`, images under `/media`.
 
 ## Developing further (Cursor / AI tools)
 Give `docs/KNOWLEDGE.md` to your AI assistant (rules file already at `.cursor/rules/project.mdc`). It lists what is built, invariants, known gaps and the prioritized next steps.
 
 ## Setup
 ```bash
-python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
-pip install -r backend/requirements.txt                         # GPU: replace onnxruntime with onnxruntime-gpu
-# put the provided sample video at data/videos/sample_video.mp4  (or set video_source in config.json)
-# docker compose -f deploy/docker-compose.yml up -d db
-# Copy .env.example → .env (DATABASE_URL points at localhost) — required.
-python main.py --config config.json
-# Clean slate: archive events.log + away_events.log, wipe the active DB, then start
-python main.py --fresh --config config.json
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+make install                                         # or: make install-backend / make install-frontend
+make db && cp .env.example .env
+make run                                             # python main.py
+# Clean slate: make fresh
 ```
-Defaults in `config.json`: `storage.backend=postgres`, `reset_on_start=false` (Start keeps faces/logs),
-`away_walkers.enabled=true` (backs-to-camera → Analytics no-face KPI), `appearance.enabled=false`.
-Postgres DSN is **not** stored in `config.json` — set `DATABASE_URL` (or `TRACKER_DSN`) in a gitignored `.env` only.
-Without a working DB the API/CLI raise an error (no SQLite fallback). Face crops and `events.log` stay under `logs/`.
-Use the dashboard **Clear registered faces** checkbox, or `python main.py --fresh`, for a clean wipe.
-Never commit `.env`, `.venv/`, `data/videos/`, or a real `DATABASE_URL` (all gitignored).
+Defaults in `config.json`: `storage.backend=postgres`, `reset_on_start=false`,
+`away_walkers.enabled=true`, `appearance.enabled=false`.
+Postgres DSN is **not** in `config.json` — only in gitignored `.env` (`DATABASE_URL`).
+Without a working DB the API/CLI raise (no SQLite fallback). Crops + `events.log` stay under `logs/`.
+Never commit `.env`, `.venv/`, `data/videos/`, or a real DSN.
 
 ### Interview (RTSP) — paste the link in the dashboard
 ```bash
-# 1) build UI once, then start API
-cd web && npm install && npm run build && cd ..
-uvicorn api.server:app --app-dir backend --port 8000
-# 2) open http://127.0.0.1:8000 → Overview → paste rtsp://… → Start
+make build-web && make api
+# open http://127.0.0.1:8000 → Overview → paste rtsp://… → Start
 ```
-That starts detect → track → embed → entry/exit logging on the backend; the Live monitor shows the annotated stream.
-
-CLI alternative (no browser): `python backend/scripts/run_rtsp.py "rtsp://USER:PASS@CAMERA_IP:554/STREAM_PATH"`
+CLI alternative: `make rtsp` then paste the URL, or  
+`python backend/scripts/run_rtsp.py "rtsp://USER:PASS@CAMERA_IP:554/STREAM_PATH"`
 
 - YOLO face weights auto-download to `data/models/yolov8n-face.pt` on first run (or place any YOLOv8 face model there).
 - InsightFace `buffalo_l` models auto-download to `~/.insightface` on first run.
@@ -176,7 +167,7 @@ Use `--no-reset` to keep an existing DB, or list the files under `"video_sources
 ## config.json
 ```json
 {
-  "video_source": "data/videos/sample_video.mp4",
+  "video_source": "data/videos/video_sample1.mp4",
   "detection_skip_frames": 2,
   "detector":    { "weights": "data/models/yolov8n-face.pt", "conf_threshold": 0.30, "imgsz": 640, "device": "auto" },
   "recognition": { "model_pack": "buffalo_l", "match_threshold": 0.45, "min_embeds_to_register": 2,
@@ -202,6 +193,23 @@ Use `--no-reset` to keep an existing DB, or list the files under `"video_sources
 Presence grace must satisfy `stationary_grace >= exit_grace >= edge_exit_grace` (seconds).
 
 **Live overlay:** yellow/cyan body + white face box with `…` = face tracked but not yet ID’d; green `ID N` = registered/recognized. Backs-of-heads and faces too small/blurry for InsightFace stay as `…` by design.
+
+### Optional video preprocessing (OFF by default)
+Dashboard **Configuration → Video preprocessing**. Improves dull/dark/noisy footage for the **face detector only** (and optional blur-gate assist). Embeddings, entry/exit crops, live preview, away detection, and disturbance stats always use the **original** frame. Runs in a background worker (async) so the tracking loop does not wait on live sources.
+
+| Step | What | Why |
+|---|---|---|
+| Auto gate | Enable steps only when brightness/contrast look dull | Skip work on good daylight |
+| Denoise | Light Gaussian / bilateral | Grainy low-light CCTV |
+| White balance | Gray-world gains (skips IR/gray) | Colour-cast cameras |
+| Gamma | LUT curve (`<1` brightens) | Under/over exposure |
+| CLAHE | Luminance contrast (LAB) | Hazy / shadowed faces |
+| Sharpen | Mild unsharp mask | Soft / compressed video |
+| Quality assist | Contrast on 112×112 blur-gate crop only | Fewer false “blurry” rejects |
+
+Settings: `config.json` `"preprocess"` < runtime override `data/runtime/preprocess.json` (hot-reload ~1s). API: `GET/PUT /api/preprocess`. Bench: `python backend/scripts/bench_preprocess.py`.
+
+Measured on this machine (all steps, detector resolution ~640 long side): pipeline avg **1.7 ms** / p95 **2.0 ms**. Async mode adds ~0 ms to the main loop when the worker is ready (fallback to original if not). Full-res and interview-machine FPS not claimed here.
 
 **File playback speed:** `stream.realtime=true` paces to the source FPS (never faster than 1×). `stream.catch_up_drop` defaults to `true` so when the CPU falls behind, file playback skips ahead and the live UI stays near realtime (set `false` for strict chronological, slower-than-realtime preview).
 
@@ -263,10 +271,12 @@ PostgreSQL (facetrack)                  # tables: faces, embeddings, events, vis
 | `SESSION_RECOVERED` | `visit_id`, `face_id`, `last_ts`, `reason=crash_recovery` |
 | `LOG_ARCHIVED` | `path` |
 | `TRACK_STARTED` / `TRACK_ENDED` | `track`, (+ `face_id`, `reason` on end). One-to-one; tentative drops → DEBUG `TRACK_DROPPED` |
-| `EMBEDDING_GENERATED` | `face_id` / pending, `track`, … |
-| `FACE_REGISTERED` | `face_id`, `unique_total`, `track` (+ `sid`) |
+| `EMBEDDING_GENERATED` | `track`, `det_score`, `attempt` |
+| `FACE_REGISTERED` | `face_id`, `unique_total`, `track` (+ `sid`) — new unique identity |
 | `FACE_RECOGNIZED` | `face_id`, `track`, `similarity` (does **not** change unique count) |
-| `ENTRY` | `ts`, `visit_id`, `face_id`, `track`, `image` (`ts` = DB `events.timestamp`) |
+| `ENTRY` | `ts`, `visit_id`, `face_id`, `track`, `image`, `entry_kind=new\|re_entry` (`ts` = DB `events.timestamp`) |
+| `NEW_ENTRY` | Same fields as ENTRY — first visit for this face (audit companion to `ENTRY`) |
+| `RE_ENTRY` | Same fields as ENTRY — returning visit after a prior EXIT (audit companion) |
 | `EXIT` | `ts`, `visit_id`, `face_id`, `track`, `image`, `duration_sec`, `visible_sec`, `occluded_sec`, `reason`, `last_seen` |
 | `VISIT_HIDDEN` | `visit_id`, `face_id`, `track`, `grace_sec`, `deadline_in_sec`, `deadline_ts` (ISO), `reason` |
 | `VISIT_RESUMED` | `face_id`, `track`, `gap_sec`, … |

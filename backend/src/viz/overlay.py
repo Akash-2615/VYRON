@@ -2,7 +2,7 @@
 import cv2
 import numpy as np
 
-from src.appearance import body_box
+from src.recognition.appearance import body_box
 
 
 def _sharp_label(frame, text, org, fg, scale=0.65, thickness=2):
@@ -48,12 +48,25 @@ def _boxes_conflict(a, b, iou_thr: float = 0.22, center_frac: float = 0.55) -> b
     return np.hypot(acx - bcx, acy - bcy) <= center_frac * diag
 
 
-def _nms_tracks(tracks, max_age: int):
+def _is_stable(t) -> bool:
+    """Prefer confirmed / identified tracks — single-frame flashes still clutter crowds."""
+    if getattr(t, "face_id", None) is not None:
+        return True
+    if getattr(t, "away_id", None) is not None:
+        return True
+    # Confirmed-ish (2+ hits): show cyan "…" while embedding so users see progress to green.
+    return int(getattr(t, "hits", 0) or 0) >= 2
+
+
+def _nms_tracks(tracks, max_age: int, *, require_stable: bool = False):
     """Keep the freshest box per person — drops trailing 'ghost' duplicates."""
     cand = [t for t in tracks if _is_visible(t, max_age)]
+    if require_stable:
+        cand = [t for t in cand if _is_stable(t)]
     ranked = sorted(
         cand,
         key=lambda t: (
+            0 if _is_stable(t) else 1,
             int(getattr(t, "time_since_update", 0) or 0),
             0 if getattr(t, "owns", False) else 1,
             0 if getattr(t, "matched_now", False) else 1,
@@ -77,11 +90,12 @@ def draw_overlay(frame, tracks, unique_count: int = 0, fps: float = 0.0,
     away_max_box_age: person/no-face tracks (defaults to max_box_age; pass a larger
     value when person YOLO runs less often than face YOLO).
     Overlapping stale tracks are NMS'd so walkers don't leave trail ghosts.
+    Tentative (unconfirmed) flashes are hidden in crowded scenes.
     """
     age = max(0, int(max_box_age))
     away_age = age if away_max_box_age is None else max(0, int(away_max_box_age))
-    face_draw = _nms_tracks(list(tracks or []), age)
-    away_draw = _nms_tracks(list(away_tracks or []), away_age)
+    face_draw = _nms_tracks(list(tracks or []), age, require_stable=True)
+    away_draw = _nms_tracks(list(away_tracks or []), away_age, require_stable=True)
 
     # Drop no-face boxes that sit on a face visitor (same body).
     away_clean = []
@@ -116,11 +130,13 @@ def draw_overlay(frame, tracks, unique_count: int = 0, fps: float = 0.0,
         if conf is not None:
             label = f"{label}  {conf:.2f}"
 
-        # Outer person/clothes box for every visible face visitor.
-        person = body_box(t.box, frame.shape)
-        if person is not None:
-            px1, py1, px2, py2 = person
-            _box(frame, px1, py1, px2, py2, colour, thickness=2)
+        # Body box only for identified visitors — tentative face flashes used to
+        # spray huge cyan person boxes across crowded hallways.
+        if t.face_id is not None:
+            person = body_box(t.box, frame.shape)
+            if person is not None:
+                px1, py1, px2, py2 = person
+                _box(frame, px1, py1, px2, py2, colour, thickness=2)
 
         # Face box — white, sharp
         _box(frame, x1, y1, x2, y2, (255, 255, 255), thickness=2)

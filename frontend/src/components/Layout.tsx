@@ -1,7 +1,7 @@
 import { ReactNode, useEffect, useState } from "react";
 import {
   BarChart3, Check, IdCard, LayoutDashboard, List, Moon, PanelLeftClose, PanelLeftOpen,
-  Pause, Play, Settings, Sun, Terminal, Users, Video,
+  Pause, Play, Settings, Sun, Terminal, Video,
 } from "lucide-react";
 import { api } from "../api";
 import { useTheme } from "../theme";
@@ -15,9 +15,8 @@ const SIDEBAR_KEY = "vyron.sidebarOpen";
 const NAV: { id: Page; label: string; icon: ReactNode }[] = [
   { id: "overview", label: "Overview", icon: <LayoutDashboard size={18} /> },
   { id: "live", label: "Live Monitor", icon: <Video size={18} /> },
-  { id: "visitors", label: "Visitors", icon: <Users size={18} /> },
-  { id: "events", label: "Event Logs", icon: <List size={18} /> },
   { id: "visitors", label: "Registered Faces", icon: <IdCard size={18} /> },
+  { id: "events", label: "Event Logs", icon: <List size={18} /> },
   { id: "analytics", label: "Analytics", icon: <BarChart3 size={18} /> },
   { id: "config", label: "Configuration", icon: <Settings size={18} /> },
   { id: "logs", label: "System Log", icon: <Terminal size={18} /> },
@@ -54,9 +53,13 @@ const TITLES: Record<Page, { title: string; sub: string }> = {
   },
 };
 
-export default function Layout({ page, onNavigate, paused, onTogglePause, connected, updatedAt, children }: {
+export default function Layout({
+  page, onNavigate, paused, onTogglePause, connected, updatedAt, children,
+  assistantOpen = false, onToggleAssistant,
+}: {
   page: Page; onNavigate: (p: Page) => void; paused: boolean; onTogglePause: () => void;
   connected: boolean; updatedAt: Date | null; children: ReactNode;
+  assistantOpen?: boolean; onToggleAssistant?: () => void;
 }) {
   const { theme, toggle } = useTheme();
   const meta = TITLES[page];
@@ -194,6 +197,23 @@ export default function Layout({ page, onNavigate, paused, onTogglePause, connec
               <i />
               {!connected ? "API offline" : paused ? "Paused" : "Live"}
             </span>
+            {onToggleAssistant && (
+              <button
+                type="button"
+                className={`assistant-pill ${assistantOpen ? "is-open" : ""}`}
+                onClick={onToggleAssistant}
+                title="ARIA (Ctrl/Cmd+K)"
+                aria-label={assistantOpen ? "Close ARIA" : "Open ARIA"}
+                aria-pressed={assistantOpen}
+              >
+                <span className="assistant-pill-shimmer" aria-hidden="true" />
+                <img className="assistant-pill-logo" src="/favicon.png" alt="" width={18} height={18} />
+                <span>ARIA</span>
+                <kbd className="assistant-pill-kbd">
+                  {typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘K" : "Ctrl+K"}
+                </kbd>
+              </button>
+            )}
             <time className="topbar-clock" dateTime={clock.toISOString()} title={updatedAt ? `Data updated ${updatedAt.toLocaleTimeString()}` : undefined}>
               {clock.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}
               {" · "}

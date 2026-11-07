@@ -112,6 +112,44 @@ def test_filter_person_dets_centre_only(tmp_path):
     db.close()
 
 
+def test_unidentified_face_flash_resumes_same_away(tmp_path):
+    """Face flash without an ID must not mint a second no-face person."""
+    pipe, db = _pipe(tmp_path)
+    # Longer grace so soft-park survives the flash gap used below.
+    pipe.away_grace_frames = 50
+    pipe.away_grace_sec = 30.0
+    frame = np.zeros((240, 320, 3), dtype=np.uint8)
+    away = Track(np.array([40, 40, 160, 220], dtype=np.float64), 0.9)
+    pipe._register_away(away, frame)
+    aid = away.away_id
+    assert aid is not None
+    pipe.away_tracker.tracks.append(away)
+    pipe.frame_idx = 10
+
+    # Unidentified face centred on the body → soft-park, not a hard AWAY_EXIT.
+    face = Track(np.array([70, 50, 110, 100], dtype=np.float64), 0.9)
+    out = pipe._promote_turned_faces([face], [away], frame)
+    assert out == []
+    assert aid in pipe.pending_away_exit
+    assert face.promoted_from_away == aid
+    assert db.away_stats()["away_exits"] == 0
+    away_log = (tmp_path / "logs" / "away_events.log").read_text()
+    assert "AWAY_EXIT_PENDING" in away_log
+    assert "awaiting_face_id" in (tmp_path / "logs" / "events.log").read_text()
+
+    # Body reappears a step ahead (walker) → same away_id, not a new one.
+    pipe.frame_idx = 20
+    t2 = Track(np.array([90, 45, 210, 230], dtype=np.float64), 0.9)
+    pipe.away_tracker.tracks.append(t2)
+    pipe._register_away(t2, frame)
+    assert t2.away_id == aid
+    assert aid not in pipe.pending_away_exit
+    assert db.away_stats()["away_unique"] == 1
+    assert db.away_stats()["away_entries"] == 1
+    assert "AWAY_RESUMED" in (tmp_path / "logs" / "away_events.log").read_text()
+    db.close()
+
+
 def test_away_resume_same_person_still_inside(tmp_path):
     """Brief loss of a sitting person must not create a new away_id every second."""
     db = Database(str(tmp_path / "c.db"), reset=True)
@@ -196,13 +234,110 @@ def test_away_linked_face_and_promote(tmp_path):
     away = Track(np.array([40, 40, 160, 220], dtype=np.float64), 0.9)
     away.away_id = aid
     away.owns = True
+    away.linked_face_id = fid
     pipe.away_present[aid] = away.id
     pipe.away_tracker.tracks.append(away)
+    # Unidentified face in the head region — restores prior linked face.
     face = Track(np.array([70, 50, 110, 100], dtype=np.float64), 0.9)
     out = pipe._promote_turned_faces([face], [away], frame)
     assert out == []
     assert face.promoted_from_away == aid
+    assert face.face_id == fid
     assert aid not in pipe.away_present
+    db.close()
+
+
+def test_promote_does_not_steal_neighbour_face_id(tmp_path):
+    """Crowded scene: a known face overlapping loosely must not label an away walker."""
+    pipe, db = _pipe(tmp_path)
+    frame = np.zeros((240, 320, 3), dtype=np.uint8)
+    aid = db.add_away_visitor("2026-11-06T10:00:00.000")
+    stranger = db.add_face("2026-11-06T10:00:01.000")
+
+    away = Track(np.array([40, 40, 160, 220], dtype=np.float64), 0.9)
+    away.away_id = aid
+    away.owns = True
+    pipe.away_present[aid] = away.id
+    pipe.away_tracker.tracks.append(away)
+
+    # Face ID already belongs to someone else; centre not in this away head band.
+    neighbour = Track(np.array([200, 40, 240, 90], dtype=np.float64), 0.9)
+    neighbour.face_id = stranger
+    out = pipe._promote_turned_faces([neighbour], [away], frame)
+    assert out == [away]
+    row = db.query("SELECT linked_face_id FROM away_visitors WHERE away_id=?", (aid,))
+    assert row[0][0] is None
+
+    # Even if the stranger's face box sits on the away body, do not steal that ID.
+    on_body = Track(np.array([70, 50, 110, 100], dtype=np.float64), 0.9)
+    on_body.face_id = stranger
+    out2 = pipe._promote_turned_faces([on_body], [away], frame)
+    assert out2 == [away]
+    row = db.query("SELECT linked_face_id FROM away_visitors WHERE away_id=?", (aid,))
+    assert row[0][0] is None
+    db.close()
+
+
+def test_claim_pending_away_does_not_steal_for_neighbour(tmp_path):
+    """Soft-parked away awaiting its own face must not link to a different person nearby."""
+    pipe, db = _pipe(tmp_path)
+    pipe.away_grace_frames = 50
+    pipe.away_grace_sec = 30.0
+    frame = np.zeros((240, 320, 3), dtype=np.uint8)
+
+    # Away walker (blue shirt) soft-parked by face track A turning.
+    away = Track(np.array([40, 40, 160, 220], dtype=np.float64), 0.9)
+    pipe._register_away(away, frame)
+    aid = away.away_id
+    pipe.away_tracker.tracks.append(away)
+    turner = Track(np.array([70, 50, 110, 100], dtype=np.float64), 0.9)
+    turner.id = 101
+    pipe._promote_turned_faces([turner], [away], frame)
+    assert aid in pipe.pending_away_exit
+    assert pipe.pending_away_exit[aid].get("promoted_by_face_track") == 101
+
+    # Neighbour (purple shirt) already has face_id=3 and is nearby — must NOT claim.
+    stranger_fid = db.add_face("2026-11-06T10:00:05.000")
+    neighbour = Track(np.array([180, 40, 220, 90], dtype=np.float64), 0.9)
+    neighbour.id = 202
+    neighbour.face_id = stranger_fid
+    pipe._claim_pending_away_for_face(neighbour, stranger_fid, frame.shape)
+    row = db.query("SELECT linked_face_id FROM away_visitors WHERE away_id=?", (aid,))
+    assert row[0][0] is None
+    assert aid in pipe.pending_away_exit
+
+    # The original turner's track getting a *new* face id may claim.
+    new_fid = db.add_face("2026-11-06T10:00:10.000")
+    turner.face_id = new_fid
+    pipe._claim_pending_away_for_face(turner, new_fid, frame.shape)
+    row = db.query("SELECT linked_face_id FROM away_visitors WHERE away_id=?", (aid,))
+    assert row[0][0] == new_fid
+    assert aid not in pipe.pending_away_exit
+    db.close()
+
+
+def test_new_face_still_gets_entry_when_away_finalize_raises(tmp_path):
+    """FACE_REGISTERED must emit ENTRY even if away→face finalize blows up (unique≈entries)."""
+    pipe, db = _pipe(tmp_path)
+    frame = np.zeros((240, 320, 3), dtype=np.uint8)
+    face = Track(np.array([80, 40, 120, 90], dtype=np.float64), 0.9)
+    face.id = 55
+    face.hits = 3
+    face.last_crop = frame[40:90, 80:120].copy()
+    face.promoted_from_away = 99  # force finalize path
+
+    def boom(*_a, **_k):
+        raise RuntimeError("simulated finalize failure")
+
+    pipe._finalize_away_after_face_id = boom  # type: ignore[method-assign]
+    emb = np.ones(4, dtype=np.float32)
+    fid = db.add_face("2026-11-07T23:42:46.000")
+    pipe._identified(face, fid, 1.0, emb, frame, is_new=True)
+
+    events = db.query("SELECT event_type FROM events WHERE face_id=?", (fid,))
+    types = [r[0] for r in events]
+    assert "entry" in types
+    assert face.owns is True
     db.close()
 
 

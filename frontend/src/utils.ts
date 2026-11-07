@@ -53,3 +53,19 @@ export function eventTone(event: string, level: string): string {
   if (event.startsWith("EMBED")) return "cyan";
   return "slate";
 }
+
+/** Label for live/event feeds from pipeline note (`new` / `re-entry`). */
+export function entryKindLabel(
+  eventType: string,
+  note: string | null | undefined,
+): { label: string; kind: "new" | "reentry" | "entry" | "exit" } {
+  if (eventType !== "entry") return { label: "Exit", kind: "exit" };
+  const n = (note || "").toLowerCase();
+  if (n.includes("re-entry") || n.includes("reentry") || n.includes("re_entry")) {
+    return { label: "Re-entry", kind: "reentry" };
+  }
+  if (n.includes("new")) {
+    return { label: "New entry", kind: "new" };
+  }
+  return { label: "Entry", kind: "entry" };
+}

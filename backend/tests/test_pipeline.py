@@ -1,6 +1,7 @@
 """End-to-end logic test with synthetic video: coloured squares stand in for faces.
 Runs without YOLO / InsightFace so it is fast and CI-friendly."""
 import os
+import re
 
 import numpy as np
 import pytest
@@ -129,7 +130,10 @@ def test_brief_gap_does_not_flicker_entry_exit(tmp_path):
     assert counts.get("entry") == 1 and counts.get("exit") == 1
     log = (tmp_path / "logs" / "events.log").read_text()
     assert "VISIT_RESUMED" in log
-    assert log.count("ENTRY") == 1
+    entry_lines = [ln for ln in log.splitlines()
+                   if re.search(r"\|\s*ENTRY\s", ln) and "NEW_ENTRY" not in ln and "RE_ENTRY" not in ln]
+    assert len(entry_lines) == 1
+    assert any("NEW_ENTRY" in ln or "entry_kind=new" in ln for ln in log.splitlines())
     db.close()
 
 
@@ -152,3 +156,50 @@ def test_multi_video_session_keeps_identities(tmp_path):
         pipe.finalize()
     assert db.unique_count() == 1
     assert db.event_counts() == {"entry": 2, "exit": 2}
+
+
+def test_soft_match_avoids_split_on_near_threshold(tmp_path):
+    """Profile / crossed-face embeds below hard threshold rematch instead of minting a twin."""
+    cfg = _base_cfg()
+    cfg["detection_skip_frames"] = 0
+    cfg["recognition"]["match_threshold"] = 0.52
+    cfg["recognition"]["soft_match_margin"] = 0.10
+    cfg["recognition"]["min_embeds_to_register"] = 2
+    cfg["presence"]["exit_grace_seconds"] = 0.4
+    cfg["presence"]["stationary_grace_seconds"] = 0.4
+    cfg["presence"]["edge_exit_grace_seconds"] = 0.2
+    cfg["appearance"] = {"enabled": False, "describe_on_register": False}
+
+    class SoftEmbedder:
+        def __init__(self):
+            self.mode = "primary"
+
+        def embed(self, crop):
+            v = np.zeros(512, dtype=np.float32)
+            if self.mode == "primary":
+                v[0] = 1.0
+            else:
+                # cosine vs primary ≈ 0.45 (below 0.52, within soft margin)
+                v[0] = 0.45
+                v[1] = float(np.sqrt(max(0.0, 1.0 - 0.45 ** 2)))
+            return v, 0.99
+
+    emb = SoftEmbedder()
+    db = Database(str(tmp_path / "soft.db"), reset=True)
+    ev = EventLogger(str(tmp_path / "logs"), str(tmp_path / "logs" / "events.log"))
+    pipe = FaceTrackingPipeline(cfg, FakeDetector(), emb, db, ev)
+    pipe.set_timing(25.0, live=False)
+    for i in range(40):
+        pipe.process_frame(make_frame(30, None), i, ts=i / 25.0)
+    assert db.unique_count() == 1
+    for i in range(40, 100):
+        pipe.process_frame(make_frame(None, None), i, ts=i / 25.0)
+    emb.mode = "near"
+    for i in range(100, 150):
+        pipe.process_frame(make_frame(30, None), i, ts=i / 25.0)
+    pipe.finalize()
+    assert db.unique_count() == 1
+    log = (tmp_path / "logs" / "events.log").read_text()
+    assert "FACE_SOFT_MATCH" in log
+    assert log.count("FACE_REGISTERED") == 1
+    db.close()

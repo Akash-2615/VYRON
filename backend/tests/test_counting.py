@@ -53,6 +53,43 @@ def test_rerun_session_without_new_registrations_is_consistent(tmp_path):
     assert any("re-run" in n for n in result["notes"])
 
 
+def test_idle_latest_session_inherits_prior_snapshot(tmp_path):
+    """Dashboard restart with empty latest session must not report Log differs by N."""
+    log = tmp_path / "events.log"
+    log.write_text(
+        _line("2026-11-07 23:42:31,000", "SYSTEM_START", sid="sessA", session="sessA")
+        + _line("2026-11-07 23:42:40,000", "FACE_REGISTERED", sid="sessA", face_id=1,
+                unique_total=1, track=1)
+        + _line("2026-11-07 23:42:41,000", "FACE_REGISTERED", sid="sessA", face_id=2,
+                unique_total=2, track=2)
+        + _line("2026-11-07 23:42:42,000", "FACE_REGISTERED", sid="sessA", face_id=3,
+                unique_total=3, track=3)
+        + _line("2026-11-07 23:42:40,500", "ENTRY", sid="sessA", face_id=1, visit_id=1, track=1)
+        + _line("2026-11-07 23:42:41,500", "ENTRY", sid="sessA", face_id=2, visit_id=2, track=2)
+        + _line("2026-11-07 23:42:42,500", "ENTRY", sid="sessA", face_id=3, visit_id=3, track=3)
+        + _line("2026-11-07 23:42:46,000", "EXIT", sid="sessA", face_id=1, visit_id=1, track=1)
+        + _line("2026-11-07 23:42:46,100", "EXIT", sid="sessA", face_id=2, visit_id=2, track=2)
+        + _line("2026-11-07 23:42:46,200", "EXIT", sid="sessA", face_id=3, visit_id=3, track=3)
+        + _line("2026-11-07 23:42:46,800", "SYSTEM_STOP", sid="sessA", session="sessA",
+                unique_visitors=3, entries=3, exits=3, open_visits=0)
+        + _line("2026-11-07 23:42:46,801", "COUNT_SNAPSHOT", sid="sessA",
+                unique_total=3, entries=3, exits=3, open_visits=0, phase="system_stop")
+        # Idle restart — no FACE_REGISTERED / ENTRY yet.
+        + _line("2026-11-07 23:43:01,000", "SYSTEM_START", sid="sessB", session="sessB")
+    )
+    latest = count_from_log(log, session="latest")
+    assert latest.session_id == "sessB"
+    assert latest.unique_visitors == 0  # no new registrations this session
+    assert latest.last_unique_total == 3
+    assert latest.last_count_snapshot and latest.last_count_snapshot["unique_total"] == 3
+    assert any("idle" in n for n in latest.notes)
+
+    from src.counting import Counts
+    db_c = Counts(unique_visitors=3, entries=3, exits=3, available=True)
+    result = reconcile(db_c, latest)
+    assert result["consistent"] is True
+
+
 def test_deleted_face_registered_is_mismatch(tmp_path):
 
     db = pipeline_run(tmp_path, skip=0)

@@ -71,7 +71,7 @@ def list_local_videos(config_path: str = "config.json") -> List[Dict[str, Any]]:
     Includes ``video_sources`` / ``video_source`` from config, plus any video files
     found under common folders (``data/videos/``, ``data/``, ``videos/``).
     """
-    from src.config import load_config
+    from src.core.config import load_config
     cfg = load_config(config_path)
     from src.core.paths import PROJECT_ROOT
     root = PROJECT_ROOT
@@ -248,10 +248,10 @@ class TrackerJob:
         events = None
         job_mode = f"dashboard_{mode}"
         try:
-            from src.config import load_config
-            from src.db_bootstrap import log_db_open, open_database
+            from src.core.config import load_config
             from src.pipeline import FaceTrackingPipeline
-            from src.session import start_session, stop_session
+            from src.session_svc import start_session, stop_session
+            from src.storage import log_db_open, open_database
             from main import run_source
 
             cfg = load_config(config_path)
@@ -275,13 +275,13 @@ class TrackerJob:
             )
             log_db_open(events, db_info)
 
-            from src.detector import HybridFaceDetector, YoloFaceDetector
-            from src.recognizer import FaceEmbedder
+            from src.detection import HybridFaceDetector, YoloFaceDetector
+            from src.recognition import FaceEmbedder
 
             appearance = None
             if cfg.get("appearance", {}).get("enabled", False):
                 try:
-                    from src.appearance import AppearanceAnalyzer
+                    from src.recognition import AppearanceAnalyzer
                     appearance = AppearanceAnalyzer(cfg["appearance"])
                 except Exception:  # noqa: BLE001
                     log.exception("Appearance model failed")
@@ -289,7 +289,7 @@ class TrackerJob:
             person_detector = None
             if cfg.get("away_walkers", {}).get("enabled", False):
                 try:
-                    from src.person_detector import YoloPersonDetector
+                    from src.detection import YoloPersonDetector
                     person_detector = YoloPersonDetector(cfg.get("person_detector", {}))
                 except Exception:  # noqa: BLE001
                     log.exception("Person detector failed")

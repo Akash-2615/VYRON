@@ -104,8 +104,10 @@ def test_session_archives_on_reset(tmp_path):
     assert not log_path.read_text().startswith("2026-11-07 12:00:00")
     archive = list((tmp_path / "logs" / "archive").glob("events_*.log"))
     assert archive and "OLD_LINE" in archive[0].read_text()
-    assert "SYSTEM_START" in log_path.read_text()
-    assert f"sid={events.session_id}" in log_path.read_text()
+    text = log_path.read_text()
+    assert "SYSTEM_START" in text
+    assert f"sid={events.session_id}" in text
+    assert "COUNT_SNAPSHOT" in text and "phase=system_start" in text
     db.close()
 
 

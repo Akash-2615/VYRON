@@ -5,8 +5,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from src.core import clock as _clock
-from src.database import Database
-from src.event_logger import EventLogger, new_session_id
+from src.event_logging import EventLogger, new_session_id
+from src.storage import Database
 
 
 def make_event_logger(cfg: dict, *, session_id: Optional[str] = None) -> EventLogger:
@@ -99,7 +99,7 @@ def prepare_fresh(cfg: dict) -> Dict[str, Any]:
     db_path = st.get("db_path") or "data/db/visitors.db"
     report["db_path"] = db_path
     # Reset only the active visitors DB for this project (SQLite file or this Postgres DB).
-    from src.db_bootstrap import open_database
+    from src.storage import open_database
     db, info = open_database(st, reset=True)
     report["db_reset"] = {
         "backend": db.backend,
@@ -148,6 +148,21 @@ def start_session(
     if extra_fields:
         fields.update(extra_fields)
     events.log("SYSTEM_START", **fields)
+    # Baseline snapshot so dashboard restarts (idle latest session) still reconcile
+    # against the live DB gallery instead of reporting unique=0 / Log differs by N.
+    try:
+        counts = db.event_counts()
+        visit_stats = db.visit_stats()
+        events.log(
+            "COUNT_SNAPSHOT",
+            unique_total=db.unique_count(),
+            entries=counts.get("entry", 0),
+            exits=counts.get("exit", 0),
+            open_visits=visit_stats.get("open_visits", 0),
+            phase="system_start",
+        )
+    except Exception:  # noqa: BLE001
+        pass
     return events
 
 

@@ -25,8 +25,11 @@ function InFrameKpi({ paused }: { paused: boolean }) {
   );
 }
 
-export default function Analytics({ summary, paused, onSelectVisitor }: {
-  summary: Summary | null; paused: boolean; onSelectVisitor: (id: number) => void;
+export default function Analytics({ summary, paused, onSelectVisitor, onSelectAway }: {
+  summary: Summary | null;
+  paused: boolean;
+  onSelectVisitor: (id: number) => void;
+  onSelectAway?: (id: number) => void;
 }) {
   const timeline = usePolling(api.timeline, [], 3000, paused);
   const away = usePolling(api.awayVisitors, [], 4000, paused);
@@ -113,10 +116,23 @@ export default function Analytics({ summary, paused, onSelectVisitor }: {
       <Card title="No-face people (excluded from unique count)">
         {away.data && away.data.length > 0 ? (
           <div className="visitor-grid noface-grid">
-            {away.data.slice(0, 16).map((v) => {
+            {away.data.slice(0, 40).map((v) => {
               const inside = v.status === "inside";
               return (
-                <div key={v.away_id} className="visitor-card noface-card" style={{ cursor: "default" }}>
+                <div
+                  key={v.away_id}
+                  className="visitor-card noface-card"
+                  role="button"
+                  tabIndex={0}
+                  style={{ cursor: "pointer" }}
+                  onClick={() => onSelectAway?.(v.away_id)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      onSelectAway?.(v.away_id);
+                    }
+                  }}
+                >
                   {(v.appearance_image || v.thumbnail) ? (
                     <img className="noface-thumb" src={v.appearance_image || v.thumbnail || ""} alt="" />
                   ) : (
@@ -130,11 +146,19 @@ export default function Analytics({ summary, paused, onSelectVisitor }: {
                     {v.appearance_summary ? (
                       <div className="appearance-line" title={v.appearance_summary}>{v.appearance_summary}</div>
                     ) : (
-                      <div className="muted small">Clothes not tagged yet</div>
+                      <div className="muted small">Clothes not tagged yet · click for details</div>
                     )}
                     {v.linked_face_id != null ? (
                       <div className="muted small">
-                        Turned → face <a onClick={() => onSelectVisitor(Number(v.linked_face_id))}>#{v.linked_face_id}</a>
+                        Turned → face{" "}
+                        <a
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onSelectVisitor(Number(v.linked_face_id));
+                          }}
+                        >
+                          #{v.linked_face_id}
+                        </a>
                       </div>
                     ) : (
                       <div className="muted small">

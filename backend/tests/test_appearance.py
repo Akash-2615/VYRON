@@ -1,7 +1,7 @@
 """Appearance helpers work without downloading OpenCLIP (enabled=False)."""
 import numpy as np
 
-from src.appearance import AppearanceAnalyzer, body_crop
+from src.appearance import AppearanceAnalyzer, body_box, body_crop, person_box_for_face
 from src.database import Database
 
 
@@ -17,6 +17,23 @@ def test_body_crop_and_color_fallback():
     assert info is not None
     assert info["summary"]
     assert "dominant_colors" in info
+
+
+def test_person_box_prefers_smallest_containing_det():
+    face = [100, 40, 140, 80]
+    dets = np.array([
+        [0, 0, 300, 240, 0.9],     # huge neighbour that also contains the face
+        [90, 30, 150, 200, 0.9],   # tight person box for this face
+        [200, 20, 280, 220, 0.9],  # other person, does not contain face centre
+    ], dtype=np.float32)
+    box = person_box_for_face(face, (240, 320), dets)
+    assert box == (90, 30, 150, 200)
+    # Heuristic half-width is ~1.15× face width (full width ~2.3×), tighter than the old 1.8×.
+    hb = body_box(face, (240, 320))
+    assert hb is not None
+    fw = face[2] - face[0]
+    assert (hb[2] - hb[0]) <= int(2.4 * fw) + 2
+    assert (hb[2] - hb[0]) < int(3.5 * fw)
 
 
 def test_db_appearance_columns(tmp_path):

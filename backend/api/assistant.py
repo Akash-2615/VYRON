@@ -1,9 +1,10 @@
-"""Optional Groq analytics assistant (SSE chat over POST)."""
+"""Optional Groq analytics assistant (SSE chat over POST) — ARIA."""
 from __future__ import annotations
 
 import json
 import logging
 import os
+import re
 import time
 from collections import defaultdict, deque
 from typing import Any, Callable, Dict, Generator, List, Optional
@@ -12,16 +13,22 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from api.assistant_prompt import ASSISTANT_SYSTEM_PROMPT
-from api.assistant_tools import TOOLS, execute_tool, status_label
+from api.assistant_format import ALLOWED_ACTIONS, ALLOWED_INLINE_TAGS, ALLOWED_PAGES
+from api.assistant_prompt import ASSISTANT_SYSTEM_PROMPT, PROMPT_VERSION
+from api.assistant_tools import TOOLS, execute_tools_parallel, live_snapshot, status_label
 from api.services import AnalyticsService
 
 log = logging.getLogger("assistant")
 
 MAX_MESSAGES = 12
 MAX_CONTENT_CHARS = 4000
-DEFAULT_MODEL = "llama-3.3-70b-versatile"
+DEFAULT_MODEL = "openai/gpt-oss-120b"
 OVERALL_TIMEOUT_SEC = 45.0
+FALLBACK_VOICE = (
+    "I couldn't reach the analytics just now — give me a moment and try again."
+)
+
+_TAG_RE = re.compile(r"\[\[([a-z]+):([^\]]+)\]\]|\[\[([a-z]+)\]\]")
 
 
 class ChatMessage(BaseModel):
@@ -33,6 +40,7 @@ class ChatContext(BaseModel):
     page: Optional[str] = None
     selected_face_id: Optional[int] = None
     filters: Optional[Dict[str, Any]] = None
+    context_dismissed: Optional[bool] = False
 
 
 class ChatRequest(BaseModel):
@@ -85,6 +93,7 @@ def assistant_settings() -> dict:
         "max_tool_rounds": max(1, min(rounds, 8)),
         "groq_installed": groq_importable,
         "has_api_key": configured,
+        "prompt_version": PROMPT_VERSION,
     }
 
 
@@ -102,47 +111,94 @@ def _trim_messages(messages: List[ChatMessage]) -> List[dict]:
 
 
 def _build_system(svc: AnalyticsService, context: Optional[ChatContext]) -> str:
+    snap = live_snapshot(svc)
     summary = svc.get_summary()
-    data_start = summary.get("data_start")
-    data_end = summary.get("data_end")
-    kpi = {
-        "unique_visitors": summary.get("unique_visitors"),
-        "total_entries": summary.get("total_entries"),
-        "total_exits": summary.get("total_exits"),
-        "currently_inside": summary.get("currently_inside"),
-        "returning_visitors": summary.get("returning_visitors"),
-        "avg_time_in_frame_seconds": summary.get("avg_time_in_frame_seconds"),
-        "peak_occupancy": summary.get("peak_occupancy"),
-        "away_unique": summary.get("away_unique"),
-    }
-    ctx_bits = []
-    if context:
-        if context.page:
-            ctx_bits.append(f"UI page: {context.page}")
-        if context.selected_face_id:
-            ctx_bits.append(f"Selected visitor: #{context.selected_face_id}")
-        if context.filters:
-            ctx_bits.append(f"Filters: {json.dumps(context.filters)[:300]}")
     prompt = ASSISTANT_SYSTEM_PROMPT.format(
-        data_start=data_start or "unknown",
-        data_end=data_end or "unknown",
-        kpi_snapshot=json.dumps(kpi, indent=2),
+        prompt_version=PROMPT_VERSION,
+        data_start=summary.get("data_start") or "unknown",
+        data_end=summary.get("data_end") or "unknown",
+        data_as_of=snap.get("data_as_of") or summary.get("data_end") or "unknown",
+        kpi_snapshot=json.dumps(snap, indent=2),
     )
+    ctx_bits = []
+    if context and not context.context_dismissed:
+        if context.page:
+            ctx_bits.append(f"Looking at page: {context.page}")
+        if context.selected_face_id:
+            ctx_bits.append(f"Looking at visitor #{context.selected_face_id}")
+        if context.filters:
+            ctx_bits.append(f"Active filters: {json.dumps(context.filters)[:300]}")
     if ctx_bits:
-        prompt += "\nUI context\n- " + "\n- ".join(ctx_bits)
+        prompt += "\n## UI context\n- " + "\n- ".join(ctx_bits)
     return prompt
 
 
-class GroqClientProtocol:
-    """Minimal surface used by the agent loop (real SDK or test fake)."""
+def extract_actions_from_answer(text: str, context: Optional[ChatContext] = None) -> List[dict]:
+    """Build server-validated navigation actions from whitelist inline tags."""
+    actions: List[dict] = []
+    seen = set()
+    for m in _TAG_RE.finditer(text or ""):
+        if m.group(3):
+            tag, arg = m.group(3), None
+        else:
+            tag, arg = m.group(1), m.group(2)
+        if tag not in ALLOWED_INLINE_TAGS:
+            continue
+        if tag == "visitor" and arg and arg.isdigit():
+            key = ("open_visitor", arg)
+            if key not in seen and "open_visitor" in ALLOWED_ACTIONS:
+                seen.add(key)
+                actions.append({
+                    "type": "open_visitor",
+                    "face_id": int(arg),
+                    "label": f"Open visitor #{arg}",
+                })
+        elif tag == "kpis":
+            key = ("goto", "overview")
+            if key not in seen:
+                seen.add(key)
+                actions.append({"type": "goto", "page": "overview", "label": "Open Overview"})
+        elif tag == "trend":
+            key = ("goto", "analytics")
+            if key not in seen:
+                seen.add(key)
+                actions.append({"type": "goto", "page": "analytics", "label": "Open Analytics"})
+        elif tag == "incident":
+            key = ("open_log", arg or "WARNING")
+            if key not in seen and "open_log" in ALLOWED_ACTIONS:
+                seen.add(key)
+                actions.append({
+                    "type": "open_log",
+                    "level": "WARNING",
+                    "event": arg,
+                    "label": "Open System Log",
+                })
+    # Context-aware soft suggestion (still whitelist)
+    if context and context.selected_face_id and not any(
+            a.get("type") == "open_visitor" for a in actions):
+        fid = int(context.selected_face_id)
+        actions.append({
+            "type": "open_visitor",
+            "face_id": fid,
+            "label": f"Open visitor #{fid}",
+        })
+    # Validate pages
+    out = []
+    for a in actions[:6]:
+        if a["type"] == "goto" and a.get("page") not in ALLOWED_PAGES:
+            continue
+        out.append(a)
+    return out
 
-    def chat_completions_create(self, **kwargs) -> Any:  # pragma: no cover - protocol
-        raise NotImplementedError
 
-
-def _real_groq_client(api_key: str):
-    from groq import Groq
-    return Groq(api_key=api_key)
+def whitelist_tags_only(text: str) -> List[str]:
+    """Return unknown tag names found (for tests)."""
+    unknown = []
+    for m in _TAG_RE.finditer(text or ""):
+        tag = m.group(3) or m.group(1)
+        if tag and tag not in ALLOWED_INLINE_TAGS:
+            unknown.append(tag)
+    return unknown
 
 
 def _call_with_retry(fn: Callable, *, retries: int = 1):
@@ -173,28 +229,39 @@ def run_agent_sse(
 ) -> Generator[str, None, None]:
     settings = assistant_settings()
     if not settings["enabled"]:
-        yield _sse("error", {"message": "Assistant is disabled (ASSISTANT_ENABLED=false)."})
+        yield _sse("error", {"message": "ARIA is turned off right now (ASSISTANT_ENABLED=false)."})
         return
-    if not settings["configured"]:
+    # Real Groq needs a key; injected test clients skip that gate.
+    if client is None and not settings["configured"]:
         yield _sse("error", {
-            "message": "Assistant not configured. Set GROQ_API_KEY in .env and pip install groq.",
+            "message": "ARIA isn't set up yet — add GROQ_API_KEY to .env and install groq, then restart the API.",
         })
         return
 
     model = model or settings["model"]
     max_rounds = max_rounds or settings["max_tool_rounds"]
-    api_key = (os.environ.get("GROQ_API_KEY") or "").strip()
     if client is None:
-        client = _real_groq_client(api_key)
-
-    system = _build_system(svc, context)
-    msgs: List[dict] = [{"role": "system", "content": system}] + messages
-    started = time.time()
+        from groq import Groq
+        client = Groq(api_key=(os.environ.get("GROQ_API_KEY") or "").strip())
 
     try:
-        for round_i in range(max_rounds):
+        system = _build_system(svc, context)
+    except Exception:  # noqa: BLE001
+        log.exception("aria_snapshot_failed")
+        yield _sse("token", {"text": FALLBACK_VOICE})
+        yield _sse("done", {"actions": []})
+        return
+
+    msgs: List[dict] = [{"role": "system", "content": system}] + messages
+    started = time.time()
+    tool_cache: Dict[str, str] = {}
+    answer_parts: List[str] = []
+
+    try:
+        for _round_i in range(max_rounds):
             if time.time() - started > OVERALL_TIMEOUT_SEC:
-                yield _sse("error", {"message": "Assistant timed out. Try a narrower question."})
+                yield _sse("token", {"text": FALLBACK_VOICE})
+                yield _sse("done", {"actions": []})
                 return
 
             def _create():
@@ -227,22 +294,30 @@ def run_agent_sse(
                         for tc in tool_calls
                     ],
                 })
-                for tc in tool_calls:
-                    name = tc.function.name
-                    yield _sse("status", {"message": status_label(name)})
-                    result = execute_tool(svc, name, tc.function.arguments)
-                    # Cap tool payload size sent back to the model
+                # Friendly status (one line) then parallel execution
+                names = [tc.function.name for tc in tool_calls]
+                yield _sse("status", {"message": status_label(names[0] if len(names) == 1 else "get_summary")})
+                if len(names) > 1:
+                    yield _sse("status", {"message": "Pulling a few numbers together…"})
+
+                call_specs = [
+                    (tc.id, tc.function.name, tc.function.arguments or "{}")
+                    for tc in tool_calls
+                ]
+                remaining = max(1.0, OVERALL_TIMEOUT_SEC - (time.time() - started))
+                results = execute_tools_parallel(
+                    svc, call_specs, cache=tool_cache, timeout_sec=min(8.0, remaining))
+                for cid, _name, result in results:
                     if len(result) > 12_000:
                         result = result[:12_000] + '…"}'
                     msgs.append({
                         "role": "tool",
-                        "tool_call_id": tc.id,
+                        "tool_call_id": cid,
                         "content": result,
                     })
                 continue
 
-            # Final streamed answer
-            yield _sse("status", {"message": "Writing answer…"})
+            yield _sse("status", {"message": "Putting that into plain words…"})
 
             def _stream():
                 return client.chat.completions.create(
@@ -255,21 +330,44 @@ def run_agent_sse(
             stream = _call_with_retry(_stream, retries=1)
             for chunk in stream:
                 if time.time() - started > OVERALL_TIMEOUT_SEC:
-                    yield _sse("error", {"message": "Assistant timed out while streaming."})
+                    yield _sse("token", {"text": " " + FALLBACK_VOICE})
+                    yield _sse("done", {"actions": []})
                     return
                 delta = chunk.choices[0].delta
                 text = getattr(delta, "content", None) or ""
                 if text:
+                    answer_parts.append(text)
                     yield _sse("token", {"text": text})
-            yield _sse("done", {})
+            full = "".join(answer_parts)
+            actions = extract_actions_from_answer(full, context)
+            yield _sse("done", {"actions": actions, "prompt_version": PROMPT_VERSION})
             return
 
-        yield _sse("error", {"message": "Too many tool rounds. Please rephrase your question."})
+        yield _sse("token", {"text": FALLBACK_VOICE})
+        yield _sse("done", {"actions": []})
     except Exception as e:  # noqa: BLE001
-        log.warning("assistant_error type=%s", type(e).__name__)
-        yield _sse("error", {
-            "message": "The assistant hit a temporary error. Please try again in a moment.",
-        })
+        name = type(e).__name__
+        msg = str(e)
+        log.warning("assistant_error type=%s detail=%s", name, msg[:240])
+        low = msg.lower()
+        if "model" in low and ("not found" in low or "does not exist" in low or "decommissioned" in low):
+            yield _sse("error", {
+                "message": (
+                    f"Groq model `{model}` isn't available on this key — "
+                    "set GROQ_MODEL in .env to a model you can access, then restart the API."
+                ),
+            })
+        elif "429" in low or "rate" in low:
+            yield _sse("error", {
+                "message": "ARIA is getting a lot of questions — wait a minute and try again.",
+            })
+        elif "connection" in low or "timeout" in low:
+            yield _sse("error", {
+                "message": "Couldn't reach Groq just now — check the network and retry.",
+            })
+        else:
+            yield _sse("token", {"text": FALLBACK_VOICE})
+        yield _sse("done", {"actions": []})
 
 
 def create_assistant_router(
@@ -282,33 +380,44 @@ def create_assistant_router(
     @router.get("/status")
     def status():
         s = assistant_settings()
+        snap = {}
+        try:
+            snap = live_snapshot(svc)
+        except Exception:  # noqa: BLE001
+            pass
         return {
             "enabled": s["enabled"],
             "configured": s["configured"],
             "model": s["model"],
             "groq_installed": s["groq_installed"],
             "has_api_key": s["has_api_key"],
+            "prompt_version": s["prompt_version"],
+            "live_summary": snap.get("plain_summary"),
+            "live_snapshot": {
+                "visitors": snap.get("visitors"),
+                "inside_now": snap.get("inside_now"),
+                "warnings_count": snap.get("warnings_count"),
+            } if snap else None,
         }
 
     @router.post("/chat")
     def chat(body: ChatRequest, request: Request):
         settings = assistant_settings()
         if not settings["enabled"]:
-            raise HTTPException(503, "Assistant is disabled (ASSISTANT_ENABLED=false).")
-        if not settings["configured"]:
+            raise HTTPException(503, "ARIA is turned off (ASSISTANT_ENABLED=false).")
+        if client_factory is None and not settings["configured"]:
             raise HTTPException(
                 503,
-                "Assistant not configured. Add GROQ_API_KEY to .env and install groq "
-                "(pip install -r requirements-api.txt). Model names change — check the Groq console.",
+                "ARIA isn't configured. Add GROQ_API_KEY to .env and install groq "
+                "(pip install -r requirements-api.txt). Model names change — set GROQ_MODEL if needed.",
             )
         ip = request.client.host if request.client else "unknown"
         if not _rate.allow(ip):
-            raise HTTPException(429, "Too many assistant requests. Please wait a minute.")
+            raise HTTPException(429, "ARIA is getting a lot of questions — wait a minute and try again.")
 
         messages = _trim_messages(body.messages or [])
         if not messages:
             raise HTTPException(400, "messages required")
-        # Drop accidental system roles from client
         messages = [m for m in messages if m["role"] in ("user", "assistant")]
         if not messages or messages[-1]["role"] != "user":
             raise HTTPException(400, "Last message must be from the user.")

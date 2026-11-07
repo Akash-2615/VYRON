@@ -1,15 +1,23 @@
-# FaceTrack — common commands (print then run). Windows: use the same shell lines from README.
+# FaceTrack — from repo root. Each target prints then runs.
 
-ROOT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
-BACKEND := $(ROOT)backend
-FRONTEND := $(ROOT)frontend
+.PHONY: install install-backend install-frontend \
+	db run fresh api web build-web test check count rtsp
 
-.PHONY: install run fresh api web build-web test check count rtsp
+# One-shot: Python (tracker + API) + frontend npm deps
+install: install-backend install-frontend
+	@echo done: make install
 
-install:
-	@echo pip install -r backend/requirements.txt \&\& pip install -r backend/requirements-api.txt
-	pip install -r backend/requirements.txt
-	pip install -r backend/requirements-api.txt
+install-backend:
+	@echo pip install -r backend/requirements.txt -r backend/requirements-api.txt
+	pip install -r backend/requirements.txt -r backend/requirements-api.txt
+
+install-frontend:
+	@echo cd frontend \&\& npm install
+	cd frontend && npm install
+
+db:
+	@echo docker compose -f deploy/docker-compose.yml up -d db
+	docker compose -f deploy/docker-compose.yml up -d db
 
 run:
 	@echo python main.py

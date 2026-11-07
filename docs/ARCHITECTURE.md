@@ -2,6 +2,8 @@
 
 Behaviour-preserving package layout introduced on branch `refactor/modular`.
 Old import paths remain via module-alias shims (see `src/*.py` files marked deprecated).
+**Prefer package imports** (`src.storage`, `src.recognition`, …) in new/edited production code;
+shims stay so tests and older scripts keep working.
 
 ## Layer diagram
 
@@ -13,8 +15,9 @@ flowchart BT
     api_entry["api.server:app (--app-dir backend)"]
   end
   subgraph api_layer["api/"]
-    routers["routers / assistant"]
-    services["services"]
+    server["server.py (HTTP routes)"]
+    services["services.py"]
+    assistant["ARIA assistant* (read-only)"]
   end
   subgraph high["src high"]
     pipeline["pipeline/"]
@@ -39,8 +42,9 @@ flowchart BT
   main --> pipeline
   scripts --> reporting
   scripts --> storage
-  api_entry --> routers
-  routers --> services
+  api_entry --> server
+  server --> services
+  server --> assistant
   services --> storage
   services --> reporting
   pipeline --> presence
@@ -84,3 +88,25 @@ sequenceDiagram
 - Heavy ML imports stay lazy inside detector / recognizer / appearance / retina constructors.
 - Pipeline stays injectable (detector/embedder passed in) for tests without models.
 - Do not change log event names, DB schema, API paths, or CLI flags while moving code.
+
+## Commenting conventions
+
+- Every package / module starts with a short docstring (what + why).
+- Large orchestrators (`pipeline.py`, `api/server.py`) use numbered **section banners** so reviewers can navigate without splitting call graphs (no extra runtime cost).
+- Prefer explaining invariants and non-obvious thresholds over narrating every line.
+
+## Optional preprocess (detector-only)
+
+```mermaid
+flowchart LR
+  src[FrameSource original] --> pipe[Pipeline]
+  src -.->|async worker| pp[detection/preprocess.py]
+  pp -.->|enhanced + scale| det[Face detector]
+  pipe --> det
+  pipe --> emb[Embed / crops / preview / away / disturbance]
+  emb --> orig[Always original frame]
+```
+
+- Settings: `config.json` `"preprocess"` (all off) overridden by `data/runtime/preprocess.json` (hot-reload ~1 s).
+- API: `GET/PUT /api/preprocess`, `POST /api/preprocess/reset`, `GET /api/preprocess/preview`.
+- Dashboard: Configuration → Video preprocessing card.

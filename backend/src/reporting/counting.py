@@ -295,7 +295,46 @@ def count_from_log(
         if sid is None or sid not in sessions:
             return Counts(available=False, warnings=[f"session_not_found:{session}"],
                           notes=[f"known={list(sessions)}"])
-    return _counts_from_acc(sessions[sid])
+    counts = _counts_from_acc(sessions[sid])
+    # Idle dashboard restart: latest session has SYSTEM_START only. Inherit gallery
+    # totals from the previous session's COUNT_SNAPSHOT / SYSTEM_STOP so DB↔log
+    # audit stays consistent until the next STREAM_END snapshot.
+    if (
+        want in ("latest", "none", "")
+        and len(order) > 1
+        and counts.unique_visitors == 0
+        and counts.entries == 0
+        and counts.exits == 0
+        and counts.last_unique_total is None
+        and not counts.last_count_snapshot
+    ):
+        prev = _counts_from_acc(sessions[order[-2]])
+        snap = prev.last_count_snapshot
+        gallery = prev.last_unique_total
+        if gallery is None and snap:
+            gallery = snap.get("unique_total")
+        if gallery is None:
+            gallery = prev.system_stop_unique
+        if gallery is not None or snap:
+            if snap:
+                counts.last_count_snapshot = dict(snap)
+            else:
+                counts.last_count_snapshot = {
+                    "unique_total": int(gallery or 0),
+                    "entries": int(prev.system_stop_entries
+                                   if prev.system_stop_entries is not None
+                                   else prev.entries),
+                    "exits": int(prev.system_stop_exits
+                                 if prev.system_stop_exits is not None
+                                 else prev.exits),
+                }
+            counts.last_unique_total = (
+                int(gallery) if gallery is not None
+                else counts.last_count_snapshot.get("unique_total")
+            )
+            counts.system_stop_unique = prev.system_stop_unique
+            counts.notes.append("latest_session_idle_using_prior_snapshot")
+    return counts
 
 
 def count_from_db(db_path: Union[str, Path]) -> Counts:

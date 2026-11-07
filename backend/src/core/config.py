@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 
 DEFAULTS = {
-    "video_source": "data/videos/sample_video.mp4",
+    "video_source": "data/videos/video_sample1.mp4",
     "video_sources": [],
     "detection_skip_frames": 2,
     "detector": {
@@ -26,6 +26,8 @@ DEFAULTS = {
     },
     "recognition": {
         "model_pack": "buffalo_l", "det_size": 320, "match_threshold": 0.45,
+        "soft_match_margin": 0.10, "register_min_det_score": 0.40,
+        "mismatch_margin": 0.08,
         "max_embeddings_per_face": 5, "min_embeds_to_register": 2,
         "embed_retry_interval": 2, "max_embed_attempts": 10,
     },
@@ -95,15 +97,37 @@ DEFAULTS = {
         "reconnect_delay_sec": 3, "max_reconnects": 0, "read_timeout_sec": 10,
         "realtime": True, "stream_gap_seconds": 1.5,
         # When true, file playback skips ahead if the CPU is behind (keeps live UI near realtime).
-        "catch_up_drop": True,
+        # Prefer false for crowded clips — aggressive dropping looks like fast-forward and breaks IDs.
+        "catch_up_drop": False,
+        # Downscale wide sources before detect/track (0 = full resolution).
+        "process_max_width": 1280,
     },
     "output": {
         "display": False,
         "annotated_video": "data/runtime/annotated.mp4",
         "live_preview": "data/runtime/live.jpg",
-        "live_jpeg_quality": 85,
-        "live_max_width": 0,
+        "live_jpeg_quality": 72,
+        "live_max_width": 960,
         "live_every_n_frames": 2,
+    },
+    # Optional dull/dark/noisy assist for the face detector only (OFF by default).
+    "preprocess": {
+        "enabled": False,
+        "process_at_detector_resolution": True,
+        "mode": "async",
+        "max_wait_ms": 50,
+        "auto_gate": {
+            "enabled": True,
+            "brightness_below": 90,
+            "contrast_below": 35,
+            "mode": "any",
+        },
+        "denoise": {"enabled": False, "method": "gaussian", "strength": 0.35},
+        "white_balance": {"enabled": False, "strength": 0.6, "max_gain": 1.5},
+        "gamma": {"enabled": False, "gamma": 0.75, "auto_target_mean": 0},
+        "clahe": {"enabled": False, "clip_limit": 2.0, "tile_grid": 8},
+        "sharpen": {"enabled": False, "amount": 0.3, "sigma": 1.0},
+        "quality_assist": {"enabled": False},
     },
 }
 
@@ -195,6 +219,7 @@ def load_config(path: str = "config.json") -> dict:
         out["live_preview"] = "data/runtime/live.jpg"
     if (out.get("annotated_video") or "") in ("output/annotated.mp4",):
         out["annotated_video"] = "data/runtime/annotated.mp4"
-    if (cfg.get("video_source") or "") == "data/sample_video.mp4":
-        cfg["video_source"] = "data/videos/sample_video.mp4"
+    legacy_src = cfg.get("video_source") or ""
+    if legacy_src in ("data/sample_video.mp4", "data/videos/sample_video.mp4"):
+        cfg["video_source"] = "data/videos/video_sample1.mp4"
     return cfg

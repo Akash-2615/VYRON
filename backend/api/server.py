@@ -6,6 +6,11 @@ Requires DATABASE_URL / TRACKER_DSN (local Postgres). Face crops and
 events.log stay under the local logs/ folder. Env: TRACKER_CONFIG,
 TRACKER_LOG_DIR, TRACKER_EVENTS_LOG, GROQ_*. If frontend/dist exists it is served
 at "/". Unit tests may inject a SQLite Database via create_app(db=...).
+
+Route groups inside ``create_app`` (closures over DB/log paths — no extra hops):
+  health / videos / tracker job / live preview / count+summary /
+  away visitors / timeline+visitors+events / embeddings / logs / static mounts
+Analytics helpers live in ``api.services``; assistant chat in ``api.assistant``.
 """
 import asyncio
 import json
@@ -23,7 +28,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from src.database import Database
+from src.storage import Database
 
 EPOCH = datetime(1970, 1, 1)
 BUCKETS = [1, 5, 10, 30, 60, 300, 900, 3600, 21600, 86400]
@@ -72,7 +77,7 @@ def create_app(db_path: Optional[str] = None, log_dir: str = "logs",
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
-        allow_methods=["GET", "POST"],
+        allow_methods=["GET", "POST", "PUT", "DELETE"],
         allow_headers=["*"],
     )
     from src.core.paths import PROJECT_ROOT, resolve_under_root
@@ -203,6 +208,7 @@ def create_app(db_path: Optional[str] = None, log_dir: str = "logs",
                 "appearance_image": media(evidence),
                 "appearance": appearance}
 
+    # --- Health & local video catalogue ------------------------------------------
     @app.get("/api/health")
     def health():
         return {
@@ -215,7 +221,7 @@ def create_app(db_path: Optional[str] = None, log_dir: str = "logs",
     @app.get("/api/videos")
     def list_videos():
         """Local videos from config.json (video_sources) for the dashboard picker."""
-        from src.tracker_job import list_local_videos
+        from src.pipeline.tracker_job import list_local_videos
         cfg_path = os.environ.get("TRACKER_CONFIG", "config.json")
         items = list_local_videos(cfg_path)
         return {
@@ -225,16 +231,17 @@ def create_app(db_path: Optional[str] = None, log_dir: str = "logs",
             "available_count": sum(1 for v in items if v.get("exists")),
         }
 
+    # --- Tracker job control (dashboard Start / Stop) ----------------------------
     @app.get("/api/tracker/status")
     def tracker_status():
         """Background RTSP tracker job state (started from the dashboard)."""
-        from src.tracker_job import get_tracker_job
+        from src.pipeline.tracker_job import get_tracker_job
         return get_tracker_job().status()
 
     @app.post("/api/tracker/start")
     def tracker_start(payload: dict = Body(default_factory=dict)):
         """Start detect → track → embed → log on RTSP, one local file, or all video_sources."""
-        from src.tracker_job import get_tracker_job
+        from src.pipeline.tracker_job import get_tracker_job
         body = payload or {}
         url = str(body.get("url") or body.get("path") or "").strip()
         mode = str(body.get("mode") or "rtsp").strip().lower()
@@ -268,10 +275,11 @@ def create_app(db_path: Optional[str] = None, log_dir: str = "logs",
 
     @app.post("/api/tracker/stop")
     def tracker_stop():
-        from src.tracker_job import get_tracker_job
+        from src.pipeline.tracker_job import get_tracker_job
         st = get_tracker_job().stop()
         return {"ok": True, **st}
 
+    # --- Live preview JPEG + stream status ---------------------------------------
     @app.get("/api/live/status")
     def live_status():
         """Whether main.py is publishing annotated frames + in-frame person counts."""
@@ -391,13 +399,14 @@ def create_app(db_path: Optional[str] = None, log_dir: str = "logs",
 
     _count_cache: dict = {"t": 0.0, "key": "", "val": None}
 
+    # --- Counts, summary, visitors, events ---------------------------------------
     @app.get("/api/count")
     def api_count(session: str = Query("latest")):
         """Unique visitor count from DB (preferred) with log reconciliation.
 
         Cached for 2 seconds. Falls back to the log when the DB is missing.
         """
-        from src.counting import count_from_database, count_from_log, reconcile
+        from src.reporting import count_from_database, count_from_log, reconcile
         now = time.time()
         key = session or "latest"
         if (_count_cache["key"] == key and _count_cache["val"] is not None
@@ -520,6 +529,59 @@ def create_app(db_path: Optional[str] = None, log_dir: str = "logs",
                 "linked_face_id": r.get("linked_face_id"),
             })
         return rows
+
+    @app.get("/api/away-visitors/{away_id}")
+    def away_visitor(away_id: int):
+        """Detail for one no-face / away walker (appearance + entry/exit timeline)."""
+        row = next((r for r in _away_rows() if int(r["away_id"]) == int(away_id)), None)
+        if row is None:
+            raise HTTPException(404, "Away visitor not found")
+        appearance = None
+        raw = row.get("appearance_json")
+        if raw:
+            try:
+                appearance = json.loads(raw)
+            except (TypeError, ValueError):
+                appearance = None
+        evidence = None
+        if appearance and isinstance(appearance, dict):
+            evidence = appearance.get("evidence_image")
+        events = []
+        last_evt = None
+        if db.exists():
+            try:
+                with connect() as con:
+                    for er in con.execute(
+                        "SELECT * FROM away_events WHERE away_id=? ORDER BY timestamp, id",
+                        (int(away_id),),
+                    ):
+                        d = _as_dict(er)
+                        last_evt = d["event_type"]
+                        events.append({
+                            "id": d["id"],
+                            "event_type": d["event_type"],
+                            "timestamp": d["timestamp"],
+                            "image": media(d.get("image_path")),
+                            "note": d.get("note"),
+                            "track_id": d.get("track_id"),
+                            "frame_idx": d.get("frame_idx"),
+                        })
+            except Exception:  # noqa: BLE001
+                pass
+        status = "inside" if last_evt == "entry" else "left"
+        return {
+            "away_id": int(row["away_id"]),
+            "first_seen": row["first_seen"],
+            "last_seen": row["last_seen"],
+            "visit_count": row["visit_count"],
+            "status": status,
+            "appearance_summary": row.get("appearance_summary"),
+            "appearance": appearance,
+            "appearance_image": media(evidence or row.get("image_path")),
+            "thumbnail": media(row.get("image_path")),
+            "linked_face_id": row.get("linked_face_id"),
+            "events": events,
+        }
 
     @app.get("/api/timeline")
     def timeline():
@@ -668,7 +730,7 @@ def create_app(db_path: Optional[str] = None, log_dir: str = "logs",
             "backend": getattr(db, "backend", None),
         }
         try:
-            from src.config import load_config as _lc
+            from src.core.config import load_config as _lc
             _cfg = _lc(os.environ.get("TRACKER_CONFIG", "config.json"))
             cfg_summary.update({
                 "detection_skip_frames": _cfg.get("detection_skip_frames"),
@@ -692,6 +754,65 @@ def create_app(db_path: Optional[str] = None, log_dir: str = "logs",
         import logging as _logging
         _logging.getLogger(__name__).warning("Assistant router not mounted: %s", exc)
 
+    # --- Optional video preprocessing (settings file write only; never DB) --------
+    from fastapi import Header, Request
+    from fastapi.responses import FileResponse
+
+    def _preprocess_cfg_block() -> dict:
+        try:
+            from src.core.config import load_config as _lc
+            return (_lc(os.environ.get("TRACKER_CONFIG", "config.json")).get("preprocess") or {})
+        except Exception:  # noqa: BLE001
+            return {}
+
+    @app.get("/api/preprocess")
+    def preprocess_get(request: Request = None,
+                       x_admin_token: Optional[str] = Header(None, alias="X-Admin-Token")):
+        from api.preprocess_service import current_payload
+        host = getattr(getattr(request, "client", None), "host", None) if request else "127.0.0.1"
+        return current_payload(
+            _preprocess_cfg_block(), client_host=host, admin_header=x_admin_token)
+
+    @app.put("/api/preprocess")
+    def preprocess_put(body: dict = Body(...), request: Request = None,
+                       x_admin_token: Optional[str] = Header(None, alias="X-Admin-Token")):
+        from api.preprocess_service import (
+            atomic_write_override, check_write_allowed, current_payload, validate_and_merge,
+        )
+        host = getattr(getattr(request, "client", None), "host", None) if request else "127.0.0.1"
+        ok, reason = check_write_allowed(host, x_admin_token)
+        if not ok:
+            raise HTTPException(403, reason)
+        try:
+            settings = validate_and_merge(body)
+            atomic_write_override(settings)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(400, "failed to write preprocess settings") from exc
+        return current_payload(
+            _preprocess_cfg_block(), client_host=host, admin_header=x_admin_token)
+
+    @app.post("/api/preprocess/reset")
+    def preprocess_reset(request: Request = None,
+                         x_admin_token: Optional[str] = Header(None, alias="X-Admin-Token")):
+        from api.preprocess_service import check_write_allowed, current_payload, reset_override
+        host = getattr(getattr(request, "client", None), "host", None) if request else "127.0.0.1"
+        ok, reason = check_write_allowed(host, x_admin_token)
+        if not ok:
+            raise HTTPException(403, reason)
+        reset_override()
+        return current_payload(
+            _preprocess_cfg_block(), client_host=host, admin_header=x_admin_token)
+
+    @app.get("/api/preprocess/preview")
+    def preprocess_preview():
+        from api.preprocess_service import preview_path
+        p = preview_path()
+        if not p.is_file():
+            raise HTTPException(404, "no preprocess preview yet")
+        return FileResponse(str(p), media_type="image/jpeg")
+
     app.mount("/media", StaticFiles(directory=str(logs)), name="media")
     if web_dist and Path(web_dist).is_dir():
         app.mount("/", StaticFiles(directory=web_dist, html=True), name="web")
@@ -704,14 +825,14 @@ def _default_app() -> FastAPI:
         load_dotenv()
     except Exception:  # noqa: BLE001
         pass
-    from src.config import load_config
-    from src.db_bootstrap import DatabaseError, open_database, redact_secrets
+    from src.core.config import load_config
     from src.core.paths import PROJECT_ROOT
+    from src.storage import DatabaseError, open_database, redact_secrets
     _cfg_path = os.environ.get("TRACKER_CONFIG", str(PROJECT_ROOT / "config.json"))
     cfg = load_config(_cfg_path)
     log_dir = os.environ.get("TRACKER_LOG_DIR", cfg["storage"]["log_dir"])
     default_log = cfg["storage"]["events_log"] if "TRACKER_LOG_DIR" not in os.environ else str(Path(log_dir) / "events.log")
-    # DATABASE_URL / TRACKER_DSN required — see src.db_bootstrap.open_database.
+    # DATABASE_URL / TRACKER_DSN required — see src.storage.open_database.
     storage = dict(cfg["storage"])
     db, db_info = open_database(storage, reset=False)
     app = create_app(db=db, log_dir=log_dir,
@@ -729,7 +850,7 @@ except Exception as _exc:  # noqa: BLE001
     # Keep `from api.server import create_app` working in tests / offline shells.
     # uvicorn api.server:app will serve a hard-fail health until DATABASE_URL works.
     import logging as _logging
-    from src.db_bootstrap import redact_secrets
+    from src.storage import redact_secrets
     _err = redact_secrets(str(_exc))
     _logging.getLogger(__name__).error("Postgres required — connect DB: %s", _err)
     app = FastAPI(title="Face Tracker Analytics API (db unavailable)")

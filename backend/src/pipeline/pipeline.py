@@ -3,6 +3,13 @@
 Also tracks people facing *away* from the camera (no usable face) via a person
 detector, stores their clothing appearance, and keeps that KPI separate from
 the unique face count.
+
+Internal layout (single class, sectioned for review — no extra call overhead):
+  1. Construction / timing
+  2. Per-frame orchestration (``process_frame``)
+  3. Away-walker / person-YOLO helpers
+  4. Face identify / register / appearance
+  5. Visit entry-exit / presence / reverify
 """
 import json
 import logging
@@ -13,13 +20,13 @@ import cv2
 import numpy as np
 
 from src.core import clock as _clock
-from src.database import Database
-from src.event_logger import EventLogger
-from src.gallery import Gallery, normalize
+from src.event_logging import EventLogger
 from src.presence import (
     STATE_BODY_ONLY, STATE_HIDDEN, STATE_PRESENT, PresenceManager,
 )
-from src.tracker import ByteTrackLite, Track, iou_matrix
+from src.recognition import Gallery, normalize
+from src.storage import Database
+from src.tracking import ByteTrackLite, Track, iou_matrix
 
 
 def crop_box(frame: np.ndarray, box, margin: float) -> Optional[np.ndarray]:
@@ -42,6 +49,7 @@ def _center_in_box(inner, outer, pad: float = 0.05) -> bool:
 
 
 class FaceTrackingPipeline:
+    # --- 1. Construction / timing -------------------------------------------------
     def __init__(self, cfg: dict, detector, embedder, db: Database, events: EventLogger,
                  appearance=None, person_detector=None):
         self.skip = cfg["detection_skip_frames"]
@@ -78,6 +86,7 @@ class FaceTrackingPipeline:
         self.away_present: Dict[int, int] = {}
         self.pending_exit: Dict[int, dict] = {}        # legacy alias unused; kept for tests that poke it
         self.pending_away_exit: Dict[int, dict] = {}
+        self._last_person_dets = None                  # cached YOLO person boxes for appearance
         self.face_as_away: Dict[int, int] = {}
         self.away_grace_frames = int(self.away_cfg.get(
             "reentry_grace_frames", tr_cfg.get("reentry_grace_frames", 75)))
@@ -166,14 +175,27 @@ class FaceTrackingPipeline:
                             gap_sec=f"{gap:.2f}")
 
     # ------------------------------------------------------------------ main step
+    # --- 2. Per-frame orchestration ----------------------------------------------
     def process_frame(self, frame: np.ndarray, frame_idx: int,
-                      ts: Optional[float] = None) -> Tuple[List[Track], List[Track]]:
+                      ts: Optional[float] = None,
+                      detect_frame: Optional[np.ndarray] = None,
+                      detect_scale: float = 1.0) -> Tuple[List[Track], List[Track]]:
+        """Process one frame.
+
+        ``frame`` is always the original (crops, preview, away, disturbance).
+        Optional ``detect_frame`` / ``detect_scale`` feed only the face detector;
+        boxes are mapped back to original coordinates.
+        """
         self.frame_idx = frame_idx
         clock = self._advance_clock(frame_idx, ts)
         self.tracker.set_time(clock)
         self.away_tracker.set_time(clock)
         run_det = frame_idx % (self.skip + 1) == 0
-        dets = self.detector.detect(frame) if run_det else None
+        det_in = detect_frame if detect_frame is not None else frame
+        dets = self.detector.detect(det_in) if run_det else None
+        if run_det and dets is not None and detect_scale and detect_scale != 1.0:
+            from src.detection.preprocess import map_boxes_to_original
+            dets = map_boxes_to_original(dets, float(detect_scale))
         if run_det and dets is not None:
             meta = getattr(self.detector, "last_meta", None)
             if isinstance(meta, dict) and meta.get("source") not in (None, "yolo"):
@@ -196,6 +218,7 @@ class FaceTrackingPipeline:
             if self.frame_idx % ((self.skip + 1) * every) == 0:
                 person_dets_raw = self.person_detector.detect(frame)
                 if person_dets_raw is not None and len(person_dets_raw):
+                    self._last_person_dets = person_dets_raw
                     roi_faces = self._faces_from_person_heads(frame, person_dets_raw, dets)
                     if roi_faces is not None and len(roi_faces):
                         dets = (np.vstack([dets, roi_faces]) if dets is not None and len(dets)
@@ -206,6 +229,9 @@ class FaceTrackingPipeline:
         active, removed = self.tracker.update(dets, frame_size)
         self._detect_disturbance(frame, n_before, removed, clock)
 
+        # Crowded frames: only embed the strongest unidentified faces each cycle.
+        max_id = max(0, int(self.rec.get("max_identify_per_frame", 6) or 6))
+        id_candidates: List[Track] = []
         for t in active:
             t.kind = "face"
             if t.matched_now:
@@ -220,10 +246,17 @@ class FaceTrackingPipeline:
                 if t.face_id is not None and not t.owns and t.matched_now:
                     self._reclaim_visit(t, frame)
                 if t.face_id is None and t.matched_now and not t.rejected:
-                    self._try_identify(t, frame)
+                    id_candidates.append(t)
                 elif t.face_id is not None and t.owns and t.matched_now:
                     self._touch_visit(t, frame)
                     self._maybe_reverify(t, frame)
+        # Prefer faces already mid-registration, then highest detector confidence.
+        id_candidates.sort(
+            key=lambda x: (len(getattr(x, "pending", []) or []), float(getattr(x, "conf", 0) or 0)),
+            reverse=True,
+        )
+        for t in id_candidates[:max_id]:
+            self._try_identify(t, frame)
 
         removed_list = list(removed)
         for t in removed_list:
@@ -261,9 +294,8 @@ class FaceTrackingPipeline:
     def in_frame_counts(self, face_tracks: List[Track], away_tracks: List[Track]) -> dict:
         """Real-time bodies currently visible (face + no-face, no double-count).
 
-        Counts every *visible* track (same age window as the overlay), not only
-        confirmed ones — otherwise crowded frames look empty in the dashboard
-        while boxes are still drawn on screen.
+        Counts confirmed / identified tracks only — tentative YOLO flashes in
+        crowded hallways were inflating the dashboard to 40+ "persons".
         """
         max_age = self.skip + 1
         face_n = 0
@@ -272,14 +304,19 @@ class FaceTrackingPipeline:
         for t in face_tracks:
             if int(getattr(t, "time_since_update", 0) or 0) > max_age:
                 continue
+            confirmed = self.tracker.is_confirmed(t)
+            if not confirmed and t.face_id is None:
+                continue
             face_n += 1
-            if self.tracker.is_confirmed(t):
+            if confirmed:
                 face_confirmed += 1
             if t.face_id is not None:
                 face_ids.add(int(t.face_id))
         away_n = 0
         for t in away_tracks:
             if int(getattr(t, "time_since_update", 0) or 0) > max_age:
+                continue
+            if not self.away_tracker.is_confirmed(t) and getattr(t, "away_id", None) is None:
                 continue
             linked = getattr(t, "linked_face_id", None)
             if linked is not None and int(linked) in face_ids:
@@ -305,9 +342,15 @@ class FaceTrackingPipeline:
         extras = []
         h, w = frame.shape[:2]
         min_side = int(self.away_cfg.get("head_roi_min_px", 160))
-        for det in person_dets:
-            if any(_center_in_box(fb, det, pad=0.08) for fb in face_boxes):
-                continue
+        # Cap ROI passes — each is a full face-YOLO call; crowds otherwise stall the live UI.
+        max_rois = max(0, int(self.away_cfg.get("max_head_roi_per_cycle", 4) or 4))
+        ranked = sorted(
+            [d for d in person_dets
+             if not any(_center_in_box(fb, d, pad=0.08) for fb in face_boxes)],
+            key=lambda d: float(d[4]) if len(d) > 4 else 0.0,
+            reverse=True,
+        )[:max_rois]
+        for det in ranked:
             x1, y1, x2, y2 = [int(v) for v in det[:4]]
             bw, bh = max(1, x2 - x1), max(1, y2 - y1)
             # Upper ~42% of the person box ≈ head/shoulders
@@ -355,6 +398,7 @@ class FaceTrackingPipeline:
         self._flush_pending_away_exits(force=True)
 
     # ------------------------------------------------------------------ away walkers
+    # --- 3. Away-walker / person-YOLO helpers ------------------------------------
     def _process_away(self, frame: np.ndarray, run_det: bool, face_tracks: List[Track],
                       person_dets: Optional[np.ndarray] = None) -> List[Track]:
         h, w = frame.shape[:2]
@@ -433,6 +477,33 @@ class FaceTrackingPipeline:
             return 0.25
         return iou
 
+    def _pending_away_resume_score(self, box, info: dict) -> float:
+        """Resume score for a soft-exited away walker (walkers need looser spatial match)."""
+        last = info.get("box")
+        if last is None:
+            return 0.0
+        score = self._same_body_region(box, last)
+        vel = info.get("vel")
+        if vel is not None:
+            try:
+                dt = max(0, int(self.frame_idx) - int(info.get("frame_idx", self.frame_idx)))
+                pred = np.asarray(last[:4], dtype=np.float64) + np.asarray(vel[:4], dtype=np.float64) * dt
+                score = max(score, self._same_body_region(box, pred))
+            except Exception:  # noqa: BLE001
+                pass
+        # Walking people often reappear ~1 body-length ahead after a face flash.
+        ax1, ay1, ax2, ay2 = [float(v) for v in box[:4]]
+        bx1, by1, bx2, by2 = [float(v) for v in last[:4]]
+        acx, acy = (ax1 + ax2) / 2.0, (ay1 + ay2) / 2.0
+        bcx, bcy = (bx1 + bx2) / 2.0, (by1 + by2) / 2.0
+        diag = max(np.hypot(ax2 - ax1, ay2 - ay1), np.hypot(bx2 - bx1, by2 - by1), 1.0)
+        dist = float(np.hypot(acx - bcx, acy - bcy))
+        if dist <= 1.25 * diag:
+            score = max(score, 0.28)
+        if dist <= 2.0 * diag:
+            score = max(score, 0.22)
+        return float(score)
+
     def _register_away(self, t: Track, frame: np.ndarray) -> None:
         # Another owned track already covering this body → same person still inside.
         for other in self.away_tracker.tracks:
@@ -452,15 +523,18 @@ class FaceTrackingPipeline:
         # Same seat / person after a brief drop → resume visit (still inside the frame).
         best_id, best_score = None, 0.0
         for aid, info in list(self.pending_away_exit.items()):
-            score = self._same_body_region(t.box, info["box"])
+            score = self._pending_away_resume_score(t.box, info)
             if score > best_score:
                 best_score, best_id = score, int(aid)
-        if best_id is not None and best_score >= 0.25:
+        if best_id is not None and best_score >= 0.22:
             info = self.pending_away_exit.pop(best_id)
             t.away_id = best_id
             t.owns = True
             self.away_present[best_id] = t.id
             t.appearance_summary = info.get("summary")
+            linked = info.get("linked_face_id")
+            if linked is not None:
+                t.linked_face_id = int(linked)
             self.events.log("AWAY_RESUMED", away_id=best_id, track=t.id,
                             score=f"{best_score:.2f}", note="still_inside")
             return
@@ -532,7 +606,8 @@ class FaceTrackingPipeline:
                         note=note or f"left_as_away:{away_id}", image=path,
                         away_id=away_id)
 
-    def _on_away_removed(self, t: Track, reason: str) -> None:
+    def _on_away_removed(self, t: Track, reason: str,
+                         promoted_by_face_track: Optional[int] = None) -> None:
         away_id = getattr(t, "away_id", None)
         self.events.log("AWAY_TRACK_ENDED", track=t.id, away_id=away_id, reason=reason)
         if t.owns and away_id is not None:
@@ -550,10 +625,13 @@ class FaceTrackingPipeline:
                     self._close_face_continued_as_away(
                         linked, int(away_id), t.last_crop, "stream_end", t.id)
             else:
-                # Defer exit — sitting / briefly unmatched people are still inside the frame.
+                # Defer exit — sitting / briefly unmatched / face-flash people stay resumable.
+                vel = getattr(t, "vel", None)
                 self.pending_away_exit[int(away_id)] = {
                     "away_id": int(away_id),
                     "box": np.asarray(t.box[:4], dtype=np.float64).copy(),
+                    "vel": (np.asarray(vel, dtype=np.float64).copy()
+                            if vel is not None else np.zeros(4, dtype=np.float64)),
                     "crop": t.last_crop,
                     "track_id": t.id,
                     "frame_idx": self.frame_idx,
@@ -561,6 +639,10 @@ class FaceTrackingPipeline:
                     "note": reason,
                     "summary": getattr(t, "appearance_summary", None),
                     "linked_face_id": linked,
+                    # Only the face track that triggered awaiting_face_id may claim later.
+                    "promoted_by_face_track": (
+                        int(promoted_by_face_track)
+                        if promoted_by_face_track is not None else None),
                 }
                 self.events.log("AWAY_EXIT_PENDING", away_id=away_id, track=t.id,
                                 grace_frames=self.away_grace_frames, reason=reason)
@@ -599,29 +681,51 @@ class FaceTrackingPipeline:
             self.pending_away_exit.pop(away_id, None)
 
     def _face_matches_away(self, face: Track, away: Track, frame: np.ndarray) -> float:
-        """Score >0 when a detected face belongs to this no-face person box (they turned)."""
-        from src.appearance import body_box
-        if _center_in_box(face.box, away.box, pad=0.25):
-            return 1.0
-        body = body_box(face.box, frame.shape)
-        box = np.asarray([(body if body is not None else face.box[:4])], dtype=np.float64)
-        ious = iou_matrix(np.asarray([away.box[:4]], dtype=np.float64), box)
-        return float(ious.max()) if ious.size else 0.0
+        """Score >0 only when the face centre sits in this person's *head* region.
+
+        Crowds previously false-linked random nearby face IDs via loose IoU.
+        Require the face centre inside the upper 55% of the person box.
+        """
+        ax1, ay1, ax2, ay2 = [float(v) for v in away.box[:4]]
+        fx1, fy1, fx2, fy2 = [float(v) for v in face.box[:4]]
+        fcx, fcy = (fx1 + fx2) * 0.5, (fy1 + fy2) * 0.5
+        pw = (ax2 - ax1) * 0.08
+        ph = (ay2 - ay1) * 0.05
+        head_bottom = ay1 + 0.55 * max(ay2 - ay1, 1.0)
+        if not ((ax1 - pw) <= fcx <= (ax2 + pw) and (ay1 - ph) <= fcy <= (head_bottom + ph)):
+            return 0.0
+        # Tight IoU of face vs person head band as confidence.
+        hx1, hy1, hx2, hy2 = ax1, ay1, ax2, head_bottom
+        ix1, iy1 = max(fx1, hx1), max(fy1, hy1)
+        ix2, iy2 = min(fx2, hx2), min(fy2, hy2)
+        inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+        area_f = max(1.0, (fx2 - fx1) * (fy2 - fy1))
+        # Face mostly inside head band → high score
+        frac = inter / area_f
+        return float(max(0.35, min(1.0, frac)))
 
     def _continue_face_as_away(self, face_t: Track, away_tracks: List[Track],
                                frame: np.ndarray) -> bool:
         """Face lost but body still visible → keep same visit, follow as no-face."""
         if face_t.face_id is None or not face_t.owns:
             return False
-        from src.appearance import body_box
+        from src.recognition.appearance import body_box
         body = body_box(face_t.box, frame.shape) or face_t.box
         best: Optional[Track] = None
         best_score = 0.0
+        second = 0.0
         for at in away_tracks:
+            # Face centre must still sit on this body (not a neighbour).
+            if not _center_in_box(face_t.box, at.box, pad=0.12):
+                continue
             score = self._same_body_region(body, at.box)
             if score > best_score:
+                second = best_score
                 best_score, best = score, at
-        if best is None or best_score < 0.22:
+            elif score > second:
+                second = score
+        # Strong unique match — avoid handing face ID 1 to a random passer-by.
+        if best is None or best_score < 0.35 or (best_score - second) < 0.08:
             return False
         if getattr(best, "away_id", None) is None:
             self._register_away(best, frame)
@@ -652,38 +756,58 @@ class FaceTrackingPipeline:
             if away_id is None:
                 remaining.append(at)
                 continue
-            best_ft: Optional[Track] = None
-            best_score = 0.0
+            ranked: List[Tuple[float, Track]] = []
             for ft in face_tracks:
                 score = self._face_matches_away(ft, at, frame)
-                if score > best_score:
-                    best_score, best_ft = score, ft
-            if best_ft is None or best_score < 0.12:
+                if score > 0:
+                    ranked.append((score, ft))
+            ranked.sort(key=lambda x: x[0], reverse=True)
+            if not ranked or ranked[0][0] < 0.45:
+                remaining.append(at)
+                continue
+            best_score, best_ft = ranked[0]
+            second = ranked[1][0] if len(ranked) > 1 else 0.0
+            if (best_score - second) < 0.12:
+                # Ambiguous in a crowd — do not guess an identity.
                 remaining.append(at)
                 continue
 
+            prior_linked = self._linked_face_for_away(int(away_id), at)
+            ft_fid = int(best_ft.face_id) if best_ft.face_id is not None else None
+            # Only reuse an existing face_id if this away was already that person
+            # (turned away earlier) — never steal a neighbour's registered ID.
+            can_reuse = False
+            if ft_fid is not None:
+                if prior_linked is not None and int(prior_linked) == ft_fid:
+                    can_reuse = True
+                elif self.face_as_away.get(ft_fid) == int(away_id):
+                    can_reuse = True
+                else:
+                    # Known face on this body but never linked → likely wrong person nearby.
+                    remaining.append(at)
+                    continue
+            elif prior_linked is not None:
+                # Unidentified face track on the same body → restore known ID.
+                best_ft.face_id = int(prior_linked)
+                ft_fid = int(prior_linked)
+                can_reuse = True
+
             best_ft.promoted_from_away = int(away_id)
-            linked = getattr(at, "linked_face_id", None)
-            self.events.log(
-                "AWAY_PROMOTED_TO_FACE",
-                away_id=int(away_id),
-                face_track=best_ft.id,
-                face_id=best_ft.face_id,
-                note="turned_to_face",
-                score=f"{best_score:.2f}",
-            )
-            if best_ft.face_id is not None:
-                self._link_away_face(int(away_id), int(best_ft.face_id))
-                self.face_as_away.pop(int(best_ft.face_id), None)
-            elif linked is not None:
-                # Prefer the known face identity when they turn back.
-                best_ft.face_id = int(linked)
-                self.face_as_away.pop(int(linked), None)
-            self._on_away_removed(at, reason="turned_to_face")
-            if at in self.away_tracker.tracks:
-                self.away_tracker.tracks.remove(at)
-            # If face already known, restore ownership without a new ENTRY.
-            if best_ft.face_id is not None:
+            if ft_fid is not None and can_reuse:
+                # Real handoff to a known face visit — permanent away exit.
+                self.events.log(
+                    "AWAY_PROMOTED_TO_FACE",
+                    away_id=int(away_id),
+                    face_track=best_ft.id,
+                    face_id=best_ft.face_id,
+                    note="turned_to_face",
+                    score=f"{best_score:.2f}",
+                )
+                self._link_away_face(int(away_id), int(ft_fid))
+                self.face_as_away.pop(int(ft_fid), None)
+                self._on_away_removed(at, reason="turned_to_face")
+                if at in self.away_tracker.tracks:
+                    self.away_tracker.tracks.remove(at)
                 fid = int(best_ft.face_id)
                 best_ft.owns = True
                 self.present[fid] = best_ft.id
@@ -696,13 +820,113 @@ class FaceTrackingPipeline:
                 elif fid not in self.presence.visits:
                     self.events.log("VISIT_RESUMED", face_id=fid, track=best_ft.id,
                                     away_id=int(away_id), note="away_promoted_to_face")
+            else:
+                # Unidentified face flash must NOT mint a new away_id when the body
+                # reappears — soft-park so `_register_away` can AWAY_RESUME.
+                # Remember which face track owns this promote so a neighbour who
+                # already has a face_id cannot steal the link later.
+                self.events.log(
+                    "AWAY_PROMOTED_TO_FACE",
+                    away_id=int(away_id),
+                    face_track=best_ft.id,
+                    face_id=best_ft.face_id,
+                    note="awaiting_face_id",
+                    score=f"{best_score:.2f}",
+                )
+                self._on_away_removed(
+                    at, reason="awaiting_face_id",
+                    promoted_by_face_track=int(best_ft.id))
+                if at in self.away_tracker.tracks:
+                    self.away_tracker.tracks.remove(at)
         return remaining
 
     def _link_away_face(self, away_id: int, face_id: int) -> None:
         self.db.set_away_linked_face(away_id, face_id)
         self.events.log("AWAY_FACE_LINK", away_id=away_id, face_id=face_id, note="turned_to_face")
 
+    def _finalize_away_after_face_id(self, away_id: int, face_id: int, face_t: Track) -> None:
+        """Face ID landed after a soft-parked promote — link and close the away visit once."""
+        self._link_away_face(int(away_id), int(face_id))
+        self.face_as_away.pop(int(face_id), None)
+        info = self.pending_away_exit.pop(int(away_id), None)
+        if info is None:
+            # Body may have AWAY_RESUMEd meanwhile — close the live away track.
+            for at in list(self.away_tracker.tracks):
+                if int(getattr(at, "away_id", -1) or -1) != int(away_id):
+                    continue
+                if not getattr(at, "owns", False):
+                    continue
+                self._on_away_removed(at, reason="turned_to_face")
+                if at in self.away_tracker.tracks:
+                    self.away_tracker.tracks.remove(at)
+                return
+            return
+        crop = info.get("crop")
+        if crop is None:
+            crop = face_t.last_crop
+        path = self.events.save_crop(
+            "away_exit", away_id, self._ts, crop, id_prefix="away")
+        self.db.log_away_event(
+            away_id, "exit", self._ts.isoformat(timespec="milliseconds"),
+            path, info.get("track_id"), self.frame_idx, note="turned_to_face")
+        self.events.log("AWAY_EXIT", away_id=away_id, track=info.get("track_id"),
+                        frame=self.frame_idx, note="turned_to_face", image=path,
+                        face_id=face_id)
+
+    def _claim_pending_away_for_face(self, face_t: Track, face_id: int,
+                                     frame_shape) -> None:
+        """Link a soft-parked away ONLY when this face is clearly that same body.
+
+        Crowds previously false-linked a neighbour's registered face_id onto an
+        unrelated no-face walker via a loose spatial score (≥0.28 within ~1 body).
+        Rules now:
+          1. If the soft-park recorded ``promoted_by_face_track``, only that face
+             track may claim (the one that actually sat in the head region).
+          2. Otherwise require the face centre in the away head band AND a strong
+             score — never claim merely because someone else is nearby.
+          3. Never overwrite an existing linked_face_id with a different face.
+        """
+        if not self.pending_away_exit:
+            return
+        # Preferred path: this track already owns the soft-park from promote.
+        owned = [
+            (int(aid), info) for aid, info in self.pending_away_exit.items()
+            if info.get("promoted_by_face_track") is not None
+            and int(info["promoted_by_face_track"]) == int(face_t.id)
+        ]
+        if owned:
+            aid, info = owned[0]
+            prior = info.get("linked_face_id")
+            if prior is not None and int(prior) != int(face_id):
+                return
+            face_t.promoted_from_away = aid
+            self._finalize_away_after_face_id(aid, face_id, face_t)
+            return
+
+        best_id, best_score = None, 0.0
+        for aid, info in list(self.pending_away_exit.items()):
+            # Reserved for another face track — do not steal.
+            owner = info.get("promoted_by_face_track")
+            if owner is not None and int(owner) != int(face_t.id):
+                continue
+            prior = info.get("linked_face_id")
+            if prior is not None and int(prior) != int(face_id):
+                continue
+            away_box = info.get("box")
+            if away_box is None:
+                continue
+            # Reuse the same head-band gate as promote (not loose body proximity).
+            fake_away = Track(np.asarray(away_box[:4], dtype=np.float64), 0.9)
+            score = self._face_matches_away(face_t, fake_away, np.zeros((1, 1, 3), dtype=np.uint8))
+            if score > best_score:
+                best_score, best_id = score, int(aid)
+        # Strong head-band overlap only — 0.55 ≈ face mostly inside head region.
+        if best_id is not None and best_score >= 0.55:
+            face_t.promoted_from_away = best_id
+            self._finalize_away_after_face_id(best_id, face_id, face_t)
+
     # ------------------------------------------------------------------ identification
+    # --- 4. Face identify / register / appearance --------------------------------
     def _quality_ok(self, box, crop) -> Optional[str]:
         x1, y1, x2, y2 = box
         if min(x2 - x1, y2 - y1) < self.quality["min_face_px"]:
@@ -710,6 +934,14 @@ class FaceTrackingPipeline:
         if crop is None:
             return "empty_crop"
         gray = cv2.cvtColor(cv2.resize(crop, (112, 112)), cv2.COLOR_BGR2GRAY)
+        # Optional contrast assist for the blur gate only (never changes embed crop).
+        pp = getattr(self, "_preprocess_settings", None)
+        if pp is not None and getattr(pp, "quality_assist", False):
+            try:
+                from src.detection.preprocess import quality_assist_gray
+                gray = quality_assist_gray(gray)
+            except Exception:  # noqa: BLE001
+                pass
         if cv2.Laplacian(gray, cv2.CV_64F).var() < self.quality["min_blur_var"]:
             return "blurry"
         return None
@@ -736,19 +968,42 @@ class FaceTrackingPipeline:
         emb, score = res
         self.events.log("EMBEDDING_GENERATED", track=t.id, det_score=f"{score:.2f}", attempt=t.embed_attempts)
 
-        thr = self.rec["match_threshold"]
+        thr = float(self.rec["match_threshold"])
+        soft = float(self.rec.get("soft_match_margin", 0.10))
+        min_reg = float(self.rec.get("register_min_det_score", 0.40))
         fid, sim = self.gallery.match(emb)
         if fid is not None and sim >= thr:
             self._identified(t, fid, sim, emb, frame, is_new=False)
             return
+        # Profile / crossed-face: near-threshold hit is the same person, not a new ID.
+        if fid is not None and sim >= thr - soft:
+            self.events.log("FACE_SOFT_MATCH", face_id=fid, track=t.id,
+                            similarity=f"{sim:.3f}", threshold=f"{thr:.2f}")
+            self._identified(t, fid, sim, emb, frame, is_new=False)
+            return
 
         t.pending.append(emb)
+        t.pending_scores.append(float(score))
         if len(t.pending) < self.rec["min_embeds_to_register"]:
             return
         mean = normalize(np.mean(t.pending, axis=0))
         fid, sim = self.gallery.match(mean)
         if fid is not None and sim >= thr:
             self._identified(t, fid, sim, mean, frame, is_new=False)
+            return
+        if fid is not None and sim >= thr - soft:
+            self.events.log("FACE_SOFT_MATCH", face_id=fid, track=t.id,
+                            similarity=f"{sim:.3f}", threshold=f"{thr:.2f}", note="mean")
+            self._identified(t, fid, sim, mean, frame, is_new=False)
+            return
+        # Weak InsightFace det scores (blur / profile) mint junk identities — wait.
+        best_score = max(t.pending_scores) if t.pending_scores else float(score)
+        if best_score < min_reg:
+            max_pending = max(int(self.rec["min_embeds_to_register"]) * 3, 6)
+            if len(t.pending) > max_pending:
+                keep = int(self.rec["min_embeds_to_register"])
+                t.pending = t.pending[-keep:]
+                t.pending_scores = t.pending_scores[-keep:]
             return
         new_id = self.db.add_face(self._ts.isoformat(timespec="milliseconds"))
         self.gallery.add(new_id, mean)
@@ -761,31 +1016,41 @@ class FaceTrackingPipeline:
                     frame: np.ndarray, is_new: bool) -> None:
         t.face_id = face_id
         t.pending = []
+        t.pending_scores = []
         if not is_new:
             self.events.log("FACE_RECOGNIZED", face_id=face_id, track=t.id, similarity=f"{sim:.3f}")
             if sim < 0.75 and self.gallery.add(face_id, emb):
                 self._save_embedding(face_id, emb, frame, t)
 
         existing = self.db.get_appearance_summary(face_id)
-        existing_img = self.db.get_appearance_image(face_id)
         want = bool(self.appearance_cfg.get("describe_on_register", True))
-        if (is_new or not existing or not existing_img) and want:
+        # Only describe on first registration — re-id / mismatch must not overwrite
+        # clothing with a neighbour's body crop.
+        if is_new and want:
             t.appearance_summary = self._describe_appearance(face_id, frame, t.box)
         else:
             t.appearance_summary = existing
 
-        # No-face walker who turned: keep monitoring as this face visitor.
-        promoted = getattr(t, "promoted_from_away", None)
-        if promoted is not None:
-            self._link_away_face(int(promoted), int(face_id))
-            note_extra = "from_away_turn"
-        else:
-            note_extra = None
+        # No-face walker who turned: link away → face. Never let claim errors skip ENTRY.
+        note_extra = None
+        try:
+            promoted = getattr(t, "promoted_from_away", None)
+            if promoted is not None:
+                self._finalize_away_after_face_id(int(promoted), int(face_id), t)
+                note_extra = "from_away_turn"
+            else:
+                self._claim_pending_away_for_face(t, int(face_id), frame.shape)
+                if getattr(t, "promoted_from_away", None) is not None:
+                    note_extra = "from_away_turn"
+        except Exception:  # noqa: BLE001
+            logging.exception(
+                "Away→face finalize failed for face_id=%s track=%s", face_id, t.id)
 
         t.embedding = np.asarray(emb, dtype=np.float32)
 
-        # Hidden / body-only visit resumed — same visit, no new ENTRY.
-        if face_id in self.presence.visits and self.presence.visits[face_id].state in (
+        # Resume paths only apply to faces that already had a visit — a brand-new
+        # FACE_REGISTERED must always get an ENTRY (unique and entries stay in sync).
+        if not is_new and face_id in self.presence.visits and self.presence.visits[face_id].state in (
                 STATE_HIDDEN, STATE_BODY_ONLY):
             t.owns = True
             self.present[face_id] = t.id
@@ -802,8 +1067,8 @@ class FaceTrackingPipeline:
                         resumed.occluded_seconds, resumed.resume_count)
             return
 
-        # Was followed as no-face after turning; face visible again — still the same visit.
-        if face_id in self.face_as_away:
+        # Was followed as no-face after turning; face visible again — same visit.
+        if not is_new and face_id in self.face_as_away:
             away_id = self.face_as_away.pop(face_id)
             self.pending_away_exit.pop(int(away_id), None)
             t.owns = True
@@ -814,6 +1079,10 @@ class FaceTrackingPipeline:
             self.events.log("VISIT_RESUMED", face_id=face_id, track=t.id,
                             away_id=away_id, note="turned_back_to_face")
             return
+
+        # New identity must not inherit a stale face_as_away / present slot.
+        if is_new:
+            self.face_as_away.pop(int(face_id), None)
 
         owner_id = self.present.get(face_id)
         owner = self.tracker.get(owner_id) if owner_id is not None else None
@@ -849,13 +1118,15 @@ class FaceTrackingPipeline:
 
     def _describe_appearance(self, face_id: int, frame: np.ndarray, box) -> Optional[str]:
         """Save a full-person evidence crop; tag clothing when OpenCLIP is loaded."""
-        from src.appearance import body_crop
-        crop = body_crop(frame, box)
+        from src.recognition.appearance import body_crop, person_box_for_face
+        person_dets = self._last_person_dets
+        pbox = person_box_for_face(box, frame.shape, person_dets=person_dets)
+        crop = body_crop(frame, box, person_dets=person_dets)
         path = self.events.save_crop("appearance", face_id, self._ts, crop) if crop is not None else None
         info: Optional[dict] = None
         if self.appearance is not None:
             try:
-                info = self.appearance.describe(frame, face_box=box)
+                info = self.appearance.describe(frame, face_box=box, person_box=pbox)
             except Exception:  # noqa: BLE001
                 logging.exception("Appearance describe failed for face %s", face_id)
                 info = None
@@ -879,6 +1150,7 @@ class FaceTrackingPipeline:
             self.db.set_face_image(face_id, path)
         return path
 
+    # --- 5. Visit entry-exit / presence / reverify -------------------------------
     def _touch_visit(self, t: Track, frame: np.ndarray) -> None:
         if t.face_id is None:
             return
@@ -919,8 +1191,16 @@ class FaceTrackingPipeline:
         path = self.events.save_crop("entry", t.face_id, when, crop)
         self.db.log_event(t.face_id, "entry", iso, path, t.id, self.frame_idx, note,
                           visit_id=visit_id)
+        # First visit for this face_id → new; later visits after a closed EXIT → re-entry.
+        note_s = (note or "").strip()
+        entry_kind = "re_entry" if note_s.startswith("re-entry") else "new"
         self.events.log("ENTRY", ts=iso, visit_id=visit_id, face_id=t.face_id,
-                        track=t.id, image=path, frame=self.frame_idx, note=note or None)
+                        track=t.id, image=path, frame=self.frame_idx,
+                        entry_kind=entry_kind, note=note_s or None)
+        # Explicit companion lines for the mandatory “new entry / re-entry” audit trail.
+        kind_event = "RE_ENTRY" if entry_kind == "re_entry" else "NEW_ENTRY"
+        self.events.log(kind_event, ts=iso, visit_id=visit_id, face_id=t.face_id,
+                        track=t.id, image=path, frame=self.frame_idx, entry_kind=entry_kind)
         self.presence.start_visit(
             int(t.face_id), entry_clock, t.id, t.box, crop=crop, emb=emb, visit_id=visit_id)
 
@@ -1070,13 +1350,25 @@ class FaceTrackingPipeline:
         t.embedding = np.asarray(emb, dtype=np.float32)
         fid, sim = self.gallery.match(emb)
         thr = float(self.rec["match_threshold"])
+        soft = float(self.rec.get("soft_match_margin", 0.10))
+        mismatch_margin = float(self.rec.get("mismatch_margin", 0.08))
         if fid is not None and fid == t.face_id and sim >= thr - self.presence.resume_margin:
             t.mismatch_streak = 0
             return
         if fid is not None and fid != t.face_id and sim >= thr:
+            cur_sim = self.gallery.similarity_to(int(t.face_id), emb)
+            # Same person under pose often beats a sibling ID by a tiny margin —
+            # keep the current ID and absorb the embedding instead of flipping.
+            if cur_sim >= 0.0 and (sim - cur_sim) < mismatch_margin:
+                if cur_sim >= thr - soft:
+                    t.mismatch_streak = 0
+                    if cur_sim < 0.75 and self.gallery.add(int(t.face_id), emb):
+                        self._save_embedding(int(t.face_id), emb, frame, t)
+                return
             t.mismatch_streak += 1
             self.events.log("IDENTITY_MISMATCH", face_id=t.face_id, new_face=fid,
-                            track=t.id, similarity=f"{sim:.3f}", streak=t.mismatch_streak)
+                            track=t.id, similarity=f"{sim:.3f}", streak=t.mismatch_streak,
+                            current_sim=f"{cur_sim:.3f}")
             if t.mismatch_streak >= 2:
                 # End wrong visit, re-attach as the matched identity.
                 old = int(t.face_id)
@@ -1084,6 +1376,7 @@ class FaceTrackingPipeline:
                 t.face_id = None
                 t.owns = False
                 t.pending = []
+                t.pending_scores = []
                 self._identified(t, int(fid), sim, emb, frame, is_new=False)
         else:
             t.mismatch_streak += 1

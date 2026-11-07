@@ -134,6 +134,69 @@ async function post<T>(path: string, body: unknown = {}): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+async function put<T>(path: string, body: unknown = {}): Promise<T> {
+  const res = await fetch(path, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    let detail = `${res.status} ${res.statusText}`;
+    try {
+      const j = await res.json();
+      if (j?.detail) detail = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail);
+    } catch { /* ignore */ }
+    throw new Error(detail);
+  }
+  return res.json() as Promise<T>;
+}
+
+export interface PreprocessParamSpec {
+  key: string;
+  label: string;
+  type: "slider" | "number" | "select";
+  min?: number;
+  max?: number;
+  default?: number | string;
+  unit?: string;
+  options?: string[];
+}
+
+export interface PreprocessStepCatalog {
+  name: string;
+  label: string;
+  what: string;
+  why: string;
+  params: PreprocessParamSpec[];
+}
+
+export interface PreprocessSettings {
+  enabled: boolean;
+  process_at_detector_resolution: boolean;
+  mode: string;
+  max_wait_ms: number;
+  auto_gate: Record<string, unknown>;
+  denoise: Record<string, unknown>;
+  white_balance: Record<string, unknown>;
+  gamma: Record<string, unknown>;
+  clahe: Record<string, unknown>;
+  sharpen: Record<string, unknown>;
+  quality_assist: Record<string, unknown>;
+  version?: number;
+}
+
+export interface PreprocessPayload {
+  enabled: boolean;
+  settings: PreprocessSettings;
+  defaults: PreprocessSettings;
+  step_catalog: PreprocessStepCatalog[];
+  presets?: Record<string, unknown>;
+  metrics: Record<string, unknown>;
+  writable: boolean;
+  version: number;
+  source: "override" | "config" | string;
+}
+
 export interface LiveStatus {
   active: boolean;
   path: string | null;
@@ -222,6 +285,10 @@ export const api = {
     get<EventPage>(`/api/events?limit=${limit}&offset=${offset}${type ? `&type=${type}` : ""}`),
   liveStatus: () => get<LiveStatus>("/api/live/status"),
   awayVisitors: () => get<AwayVisitor[]>("/api/away-visitors"),
+  awayVisitor: (id: number) =>
+    get<AwayVisitor & {
+      events: { id: number; event_type: string; timestamp: string; image: string | null; note: string | null; track_id?: number | null; frame_idx?: number | null }[];
+    }>(`/api/away-visitors/${id}`),
   trackerStatus: () => get<TrackerJobStatus>("/api/tracker/status"),
   localVideos: () => get<LocalVideoList>("/api/videos"),
   trackerStart: (
@@ -239,6 +306,10 @@ export const api = {
     }),
   trackerStop: () => post<TrackerJobStatus>("/api/tracker/stop"),
   assistantStatus: () => get<AssistantStatus>("/api/assistant/status"),
+  preprocess: () => get<PreprocessPayload>("/api/preprocess"),
+  preprocessPut: (body: Record<string, unknown>) => put<PreprocessPayload>("/api/preprocess", body),
+  preprocessReset: () => post<PreprocessPayload>("/api/preprocess/reset"),
+  preprocessPreviewUrl: () => `/api/preprocess/preview?t=${Date.now()}`,
 };
 
 export interface AssistantStatus {
@@ -247,6 +318,13 @@ export interface AssistantStatus {
   model: string;
   groq_installed?: boolean;
   has_api_key?: boolean;
+  prompt_version?: string;
+  live_summary?: string;
+  live_snapshot?: {
+    visitors?: number;
+    inside_now?: number;
+    warnings_count?: number;
+  } | null;
 }
 
 export interface AssistantContext {

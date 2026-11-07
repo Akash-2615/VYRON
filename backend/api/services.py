@@ -10,8 +10,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from src.counting import count_from_database, count_from_log, reconcile
-from src.database import Database
+from src.reporting import count_from_database, count_from_log, reconcile
+from src.storage import Database
 
 EPOCH = datetime(1970, 1, 1)
 BUCKETS = [1, 5, 10, 30, 60, 300, 900, 3600, 21600, 86400]

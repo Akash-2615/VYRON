@@ -1,4 +1,14 @@
-"""events.log writer + crop image store + session helpers."""
+"""events.log writer + crop image store + session helpers.
+
+Mandatory critical events (always INFO in ``events.log``):
+  TRACK_STARTED / TRACK_ENDED   — face tracking lifecycle
+  EMBEDDING_GENERATED           — ArcFace vector produced
+  FACE_REGISTERED               — new unique identity
+  FACE_RECOGNIZED               — gallery match of a known face
+  ENTRY (+ NEW_ENTRY | RE_ENTRY)— visit open (first time vs returning)
+  EXIT                          — visit close
+  COUNT_SNAPSHOT                — unique / entry / exit totals
+"""
 from __future__ import annotations
 
 import logging
@@ -28,6 +38,14 @@ DEBUG_EVENTS = {
     "FACE_ROI_REFINE", "FACE_RETINA_ASSIST", "RETINA_FACE_READY", "RETINA_FACE_UNAVAILABLE",
     "EMBED_NO_FACE", "TRACK_LOST", "TRACK_DROPPED",
 }
+
+# Documented critical face-visit events (grep aid; not filtered).
+CRITICAL_EVENTS = frozenset({
+    "TRACK_STARTED", "TRACK_ENDED",
+    "EMBEDDING_GENERATED", "FACE_REGISTERED", "FACE_RECOGNIZED",
+    "ENTRY", "NEW_ENTRY", "RE_ENTRY", "EXIT",
+    "COUNT_SNAPSHOT",
+})
 
 
 def new_session_id(when: Optional[datetime] = None) -> str:

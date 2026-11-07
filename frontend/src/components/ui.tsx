@@ -1,11 +1,12 @@
 import { ReactNode, useState } from "react";
 import { User } from "lucide-react";
 
-export function Card({ title, action, children, className = "", id }: {
+export function Card({ title, action, children, className = "", id, style }: {
   title?: string; action?: ReactNode; children: ReactNode; className?: string; id?: string;
+  style?: React.CSSProperties;
 }) {
   return (
-    <section className={`card ${className}`} id={id}>
+    <section className={`card ${className}`} id={id} style={style}>
       {title && (
         <header className="card-head">
           <h3>{title}</h3>
@@ -17,7 +18,10 @@ export function Card({ title, action, children, className = "", id }: {
   );
 }
 
-export function Badge({ kind, children }: { kind: "entry" | "exit" | "inside" | "left" | "returning" | "new"; children: ReactNode }) {
+export function Badge({ kind, children }: {
+  kind: "entry" | "exit" | "inside" | "left" | "returning" | "new" | "reentry";
+  children: ReactNode;
+}) {
   return <span className={`badge badge-${kind}`}>{children}</span>;
 }
 

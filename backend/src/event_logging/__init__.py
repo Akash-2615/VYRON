@@ -4,6 +4,7 @@ Must not import pipeline or api. Depends only on core (clock).
 """
 from .event_logger import (
     AWAY_EVENTS,
+    CRITICAL_EVENTS,
     DEBUG_EVENTS,
     EventLogger,
     new_session_id,
@@ -11,6 +12,7 @@ from .event_logger import (
 
 __all__ = [
     "AWAY_EVENTS",
+    "CRITICAL_EVENTS",
     "DEBUG_EVENTS",
     "EventLogger",
     "new_session_id",

@@ -12,12 +12,13 @@ import LiveMonitor from "../components/LiveMonitor";
 import { Card, Empty, Thumb } from "../components/ui";
 import { useCssVar } from "../theme";
 import { usePolling } from "../api";
-import { fmtTime } from "../utils";
+import { entryKindLabel, fmtTime } from "../utils";
 
 type ExpandChart = "flow" | "status" | null;
 
-export default function Overview({ summary, paused, onSelectVisitor }: {
+export default function Overview({ summary, paused, onSelectVisitor, onOpenLive }: {
   summary: Summary | null; paused: boolean; onSelectVisitor: (id: number) => void;
+  onOpenLive?: () => void;
 }) {
   const [expanded, setExpanded] = useState<ExpandChart>(null);
   const timeline = usePolling(api.timeline, [], 3000, paused);
@@ -61,9 +62,15 @@ export default function Overview({ summary, paused, onSelectVisitor }: {
   const tooltipStyle = { borderRadius: 10, fontSize: 12, background: surface, border: `1px solid ${border}`, color: text };
 
   const audit = countAudit.data;
+  const uniqueN = s?.unique_visitors ?? null;
+  const entriesN = s?.total_entries ?? null;
   let uniqueBadge: { text: string; tone: "ok" | "warn" | "muted" } | undefined;
   let uniqueBadgeTitle: string | undefined;
-  if (audit && audit.consistent === true && audit.derived_from_log) {
+  // Unique (= faces rows) should not outrun entries; that means a register without ENTRY.
+  if (uniqueN != null && entriesN != null && uniqueN > entriesN) {
+    uniqueBadge = { text: `Entries behind by ${uniqueN - entriesN}`, tone: "warn" };
+    uniqueBadgeTitle = "A face was registered without an ENTRY — re-run with the latest pipeline fix";
+  } else if (audit && audit.consistent === true && audit.derived_from_log) {
     uniqueBadge = { text: "Verified against log", tone: "ok" };
     uniqueBadgeTitle = `session ${audit.session_id ?? "—"} · as of ${audit.as_of}`;
   } else if (audit && audit.consistent === false) {
@@ -127,7 +134,7 @@ export default function Overview({ summary, paused, onSelectVisitor }: {
 
       <div className="dash-board">
         <div className="dash-main">
-          <LiveMonitor paused={paused} compact />
+          <LiveMonitor paused={paused} compact onMaximize={onOpenLive} />
 
           <div className="analytics-block" id="analytics-overview">
             <div className="section-label">
@@ -197,17 +204,18 @@ export default function Overview({ summary, paused, onSelectVisitor }: {
             {recent.data && recent.data.items.length > 0 ? (
               <ul className="event-feed compact">
                 {recent.data.items.map((e) => {
+                  const kind = entryKindLabel(e.event_type, e.note);
                   const isEntry = e.event_type === "entry";
                   return (
                     <li key={e.id}>
                       <button type="button" className="event-row" onClick={() => onSelectVisitor(e.face_id)}>
                         <Thumb src={e.image} size={32} round />
-                        <span className={`event-icon ${isEntry ? "entry" : "exit"}`}>
+                        <span className={`event-icon ${kind.kind}`}>
                           {isEntry ? <ArrowDownLeft size={14} /> : <ArrowUpRight size={14} />}
                         </span>
                         <span className="event-meta">
                           <b>ID: V{String(e.face_id).padStart(4, "0")}</b>
-                          <span>{isEntry ? "Entry" : "Exit"}</span>
+                          <span className={`event-kind event-kind-${kind.kind}`}>{kind.label}</span>
                         </span>
                         <span className="event-time">{fmtTime(e.timestamp)}</span>
                       </button>
