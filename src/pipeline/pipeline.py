@@ -12,14 +12,14 @@ from typing import Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
-from . import clock as _clock
-from .database import Database
-from .event_logger import EventLogger
-from .gallery import Gallery, normalize
-from .presence import (
+from src.core import clock as _clock
+from src.database import Database
+from src.event_logger import EventLogger
+from src.gallery import Gallery, normalize
+from src.presence import (
     STATE_BODY_ONLY, STATE_HIDDEN, STATE_PRESENT, PresenceManager,
 )
-from .tracker import ByteTrackLite, Track, iou_matrix
+from src.tracker import ByteTrackLite, Track, iou_matrix
 
 
 def crop_box(frame: np.ndarray, box, margin: float) -> Optional[np.ndarray]:
@@ -600,7 +600,7 @@ class FaceTrackingPipeline:
 
     def _face_matches_away(self, face: Track, away: Track, frame: np.ndarray) -> float:
         """Score >0 when a detected face belongs to this no-face person box (they turned)."""
-        from .appearance import body_box
+        from src.appearance import body_box
         if _center_in_box(face.box, away.box, pad=0.25):
             return 1.0
         body = body_box(face.box, frame.shape)
@@ -613,7 +613,7 @@ class FaceTrackingPipeline:
         """Face lost but body still visible → keep same visit, follow as no-face."""
         if face_t.face_id is None or not face_t.owns:
             return False
-        from .appearance import body_box
+        from src.appearance import body_box
         body = body_box(face_t.box, frame.shape) or face_t.box
         best: Optional[Track] = None
         best_score = 0.0
@@ -849,7 +849,7 @@ class FaceTrackingPipeline:
 
     def _describe_appearance(self, face_id: int, frame: np.ndarray, box) -> Optional[str]:
         """Save a full-person evidence crop; tag clothing when OpenCLIP is loaded."""
-        from .appearance import body_crop
+        from src.appearance import body_crop
         crop = body_crop(frame, box)
         path = self.events.save_crop("appearance", face_id, self._ts, crop) if crop is not None else None
         info: Optional[dict] = None
