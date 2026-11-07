@@ -34,30 +34,29 @@ dashboard has not been viewed in a browser** (type-check and production build pa
 ## 3. Repository map
 ```
 config.json                 runtime config (see section 5)
-main.py                     CLI entry: --config, --source, --sources (multi-video session), --no-reset, --display, --max-frames
-run_rtsp.py                 Interview helper: paste RTSP URL → auto models + DB + live window + dashboard
-src/config.py               DEFAULTS + deep-merge + validation (auto-raises tracker.max_lost_frames to >= 2*(skip+1)+2)
-src/stream.py               FrameSource: file = sequential cv2 read; live (rtsp/http/webcam idx) = reader thread, latest frame, reconnect
-src/detector.py             YoloFaceDetector + HybridFaceDetector (Retina/SCRFD fallback); detect -> (N,5)
-src/retina_face.py          RetinaFace-family secondary detector (SCRFD det_10g)
-src/recognizer.py           FaceEmbedder.embed(crop) -> (L2-normalised 512-d, det_score) | None  (InsightFace re-detects/aligns inside the crop)
-src/gallery.py              In-memory cosine-matching gallery (<= max_embeddings_per_face per identity)
-src/tracker.py              ByteTrackLite: IoU + velocity prediction, 2-stage (high/low conf) association, coasting through skipped frames
-src/pipeline.py             FaceTrackingPipeline: detect -> track -> identify -> entry/exit events. THE core file.
-src/database.py             PostgreSQL (default) or SQLite; commit-per-write; auto-migration
-src/clock.py                wall_now / mono / wall_from_mono / iso_ms (single time source)
-src/session.py              session_id, archive-on-reset, crash recovery, SYSTEM_START/STOP
-src/counting.py             count_from_db / count_from_log / reconcile / verify_log_invariants
-src/event_logger.py         events.log + away_events.log (sid on every line, TRACK pairing) + crops
-scripts/count.py            CLI reconcile DB ↔ log (exit 0/1/2)
-scripts/verify_log.py       session invariant checker
-src/visualize.py            Overlay for annotated video / live window
-scripts/report.py           Print/export DB (CSV) ; scripts/seed_demo.py  fake demo data into demo/ (never touches real data)
-api/server.py               FastAPI read-only API (create_app factory) + serves web/dist and /media
-web/                        Vite + React 18 + TypeScript + Recharts + lucide-react dashboard
-tests/test_pipeline.py      synthetic end-to-end logic tests (fake detector/embedder: coloured squares)
-tests/test_api.py           API tests (skipped if fastapi/httpx missing)
-docs/PROMPTS.md             prompt log template (fill this in!)
+main.py                     CLI entry (flags unchanged)
+run_rtsp.py                 Interview helper
+src/core/                   config, clock
+src/session_svc/            session bootstrap / crash recovery
+src/event_logging/          EventLogger + crop store
+src/storage/                Database + schema DDL + open_database bootstrap
+src/detection/              YOLO face, RetinaFace, person YOLO
+src/recognition/            embedder, gallery, appearance
+src/tracking/               ByteTrackLite + IoU
+src/video_io/               FrameSource + live JPEG publisher
+src/presence/               visit state machine
+src/pipeline/               FaceTrackingPipeline + tracker_job
+src/reporting/              counting / reconcile / verify_log
+src/viz/                    overlay drawing
+src/*.py                    deprecated module-alias shims (old import paths)
+api/server.py               FastAPI create_app + routes (split pending)
+api/services.py             AnalyticsService
+scripts/                    thin CLIs + golden_snapshot.py + check_layers.py
+web/                        Vite + React dashboard
+docs/ARCHITECTURE.md        layer diagram + data flow
+```
+Layer rules: `scripts/check_layers.py` (also `tests/test_layers.py`). See docs/ARCHITECTURE.md.
+Old paths (`from src.database import Database`, etc.) still work via shims.
 ```
 
 ## 4. How the pipeline works (read before editing `src/pipeline.py`)

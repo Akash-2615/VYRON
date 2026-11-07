@@ -1,6 +1,6 @@
 """Core utilities: config defaults/validation and the single time source.
 
-Session helpers live in ``src.core.session`` (also shimmed as ``src.session``).
+Session helpers live in ``src.session_svc`` (shimmed as ``src.session``).
 Must not import detection, pipeline, or api.
 """
 from .clock import iso_ms, is_anomalous, mono, wall_from_mono, wall_now

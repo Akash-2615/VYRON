@@ -8,6 +8,8 @@ Hard rules:
 - Keep the exactly-one-entry/one-exit-per-visit and unique-count (rows in `faces`) invariants (KNOWLEDGE.md section 4).
 - Heavy model imports stay lazy; the pipeline takes detector/embedder by injection so tests run without models.
 - Run `pytest -q` after changes to src/ or api/; `cd web && npm run build` after changes to web/.
-- DB schema changes need a migration in `Database._migrate`. Never write demo data into real `data/` or `logs/`.
+- DB schema changes need a migration in `Database._migrate` / `src/storage/schema.py`. Never write demo data into real `data/` or `logs/`.
 - Do not claim something is verified unless it was run. Follow the P0 list in KNOWLEDGE.md section 11 before adding features.
 - README must end with: This project is a part of a hackathon run by https://katomaran.com
+- Modular layout layers (docs/ARCHITECTURE.md): lower packages must not import higher ones; enforce with `scripts/check_layers.py`.
+- While moving code: no logic changes, no renamed config/API/log/DB/CLI; leave deprecated shims at old import paths.
