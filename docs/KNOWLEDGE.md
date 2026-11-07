@@ -1,216 +1,165 @@
-# Project Knowledge File — Intelligent Face Tracker (Katomaran Hackathon)
+# VYRON — Project knowledge
 
-> Purpose: give this file to Cursor (or any AI coding tool) as context. It states what exists, why it is built the way it is,
-> what is verified vs. unverified, and exactly what to build next. Read sections 1-6 before changing code.
+Authoritative context for the codebase: what exists, why, invariants, and what remains for submission. Read sections **1–4** before changing pipeline or counting logic.
 
-## 1. Goal and hard deadline
-Hackathon task by Katomaran: an AI visitor counter that processes a video (dev) or a **live RTSP stream (interview)**, detects/tracks/recognizes
-faces, auto-registers new faces, logs **exactly one entry and one exit per visit** (crop image + timestamp + type + face id) to a log file,
-local image folders and a database, and reports the **unique visitor count** (re-identification must NOT increase it).
-- Submission: GitHub repo via Google Form **before 6 PM, Sunday 8 Nov 2026**.
-- README must contain: setup, assumptions, sample `config.json`, AI planning doc, architecture diagram, **Loom/YouTube video link
-  (no video = not reviewed)**, sample output (logs, images, DB entries), and the exact last line:
-  `This project is a part of a hackathon run by https://katomaran.com`.
-- Mandatory stack: YOLO (v5/v8) detection, InsightFace/ArcFace embeddings (NOT the `face_recognition` library), OpenCV/DeepSort/ByteTrack tracking,
-  Python backend, PostgreSQL (default; SQLite for tests), `config.json` with frame-skip parameter, log file + image store + DB.
-- Prompts used with AI tools are evaluated in the interview -> keep `docs/PROMPTS.md` updated and understand every module.
+## 1. Goal
 
-## 2. Status: what is built
-All three core modules are implemented. **Everything below was tested only with fake detector/embedder on synthetic video
-(`pytest`: 6 passing). It has NOT yet been run with real YOLO + InsightFace, real videos, a GPU, or a live RTSP stream, and the React
-dashboard has not been viewed in a browser** (type-check and production build pass; API endpoints verified with curl on demo data).
+Katomaran hackathon: AI visitor counter for **video (dev)** or **live RTSP (interview)**.
+Detect → track → recognize → auto-register faces; log **exactly one entry and one exit per visit** (crop + timestamp + face id) to log file, image folders, and Postgres; report **unique visitors** that do **not** grow on re-identification.
+
+**Stack:** YOLOv8-face (+ RetinaFace assist), InsightFace/ArcFace (`buffalo_l`, not `face_recognition`), ByteTrack-style tracker, Python backend, PostgreSQL (SQLite tests only), `config.json` with frame-skip, React dashboard, optional ARIA (Groq).
+
+**Submission checklist (README):** setup, assumptions, sample config, planning notes, architecture diagram, Loom/YouTube link, sample output, last line exactly  
+`This project is a part of a hackathon run by https://katomaran.com`.
+
+Design prompts: [`docs/PROMPTS.md`](PROMPTS.md). Layout & diagrams: [`docs/ARCHITECTURE.md`](ARCHITECTURE.md).
+
+## 2. What is built
 
 | Area | State |
 |---|---|
-| Detection (YOLOv8-face + RetinaFace/SCRFD fallback), embeddings (InsightFace `buffalo_l`), tracking (own ByteTrack-style), gallery matching, auto-registration | Built |
-| Entry/exit state machine (exactly-once, handover, end-of-stream flush) | Built, unit-tested |
-| Logging: `events.log` + crops in `logs/{entries,exits,faces}/YYYY-MM-DD/` + PostgreSQL | Built, tested |
-| Unique count (`SELECT COUNT(*) FROM faces`) | Built, tested |
-| Multi-video session with one combined unique count (`--sources a.mp4 b.mp4`) | Built, unit-tested |
-| RTSP (TCP, threaded latest-frame reader, auto-reconnect) | Built; live path unit-tested; interview runner `run_rtsp.py` (paste URL only) |
-| FastAPI API + React/TS dashboard (Overview, Visitors w/ Face & Embedding tab, Event Log, System Log) | Built; demo data via `scripts/seed_demo.py`. **Read-only except** `PUT/POST /api/preprocess*` which may write only `data/runtime/preprocess.json` (never the DB). |
-| Optional video preprocess (dull/dark detector assist; denoise optional) | Built; OFF by default; async; originals used for crops/preview/away/disturbance; quality_assist = blur-gate crop only |
-| README with architecture diagram, planning doc, compute estimates | Written; has placeholders (video link, sample output) |
+| Detect / embed / track / gallery auto-register | Built |
+| Presence visit SM (1 entry + 1 exit / visit) | Built + unit-tested |
+| `events.log` + crops + Postgres | Built + tested |
+| Unique = `COUNT(faces)` + count audit CLI/API | Built + tested |
+| Multi-video one gallery (`--sources`) | Built + unit-tested |
+| RTSP TCP latest-frame + reconnect; webcam; local file | Built |
+| Dashboard: Overview, Live Monitor, Faces, Events, Analytics, Config, System Log | Built |
+| Optional preprocess (detector-only, OFF by default) | Built + tested |
+| ARIA read-only assistant | Built (needs `GROQ_API_KEY` live) |
+| Architecture diagram in README | Shipped (`docs/assets/vyron-architecture.png`) |
+
+Honest gaps: tune thresholds on your footage; fill README **demo video URL** and concrete **sample output** numbers after a clean final run. Prefer stating what you actually measured over claiming unverified FPS.
 
 ## 3. Repository map
+
 ```
 config.json                 runtime config (repo root)
-main.py                     thin shim → backend/main.py
-Makefile / pyproject.toml   DX + pytest pythonpath=backend
-backend/                    Python root (packages src + api unchanged)
-  main.py                   CLI entry (flags unchanged)
-  src/core/                 config, clock, paths (PROJECT_ROOT)
+main.py                     shim → backend/main.py
+Makefile / pyproject.toml   DX; pytest pythonpath=backend
+backend/                    Python root (src + api)
+  main.py                   CLI
+  src/core/                 config, clock, paths
   src/session_svc/          session bootstrap / crash recovery
-  src/event_logging/        EventLogger + crop store
+  src/event_logging/        EventLogger + crops
   src/storage/              Database + schema + open_database
   src/detection|recognition|tracking|video_io|presence|pipeline|reporting|viz/
-  api/                      FastAPI create_app + assistant + services
-  scripts/                  CLIs + golden_snapshot + check_layers + run_rtsp.py
-  tests/                    pytest suite
-frontend/                   Vite + React dashboard (was web/)
-  src/api/                  HTTP client + usePolling
-  src/pages/ | components/  screens + shared UI
-  public/brand/             logos / marks
-data/                       videos, models, db, runtime, demo (gitignored bulk)
-deploy/                     docker-compose, mediamtx, local certs
-docs/                       KNOWLEDGE, ARCHITECTURE, PROMPTS
-logs/  samples/             task deliverables (stay at root)
+  api/                      FastAPI + ARIA + services
+  scripts/                  count, final_check, run_rtsp, check_layers, …
+  tests/
+frontend/                   Vite + React dashboard
+data/                       videos, models, db, runtime, demo (mostly gitignored)
+deploy/                     docker-compose Postgres, MediaMTX
+docs/                       KNOWLEDGE, ARCHITECTURE, PROMPTS, assets/
+logs/  samples/             deliverables at repo root
 ```
-Layer rules: `python backend/scripts/check_layers.py` (also `backend/tests/test_layers.py`). See docs/ARCHITECTURE.md.
-Old imports (`from src.database import Database`, etc.) still work via shims; run with `pythonpath=backend`.
 
-## 4. How the pipeline works (read before editing `src/pipeline.py`)
-1. `process_frame(frame, idx)`: run YOLO only when `idx % (detection_skip_frames+1) == 0`; otherwise tracks coast on velocity.
-2. `ByteTrackLite.update` returns active + removed tracks. A track is *confirmed* after `min_hits` detection matches.
-   Removed when unmatched for `max_lost_frames`, when a tentative track misses one cycle, or when its predicted centre leaves the frame.
-3. Identification (only for confirmed tracks, only on frames where the track was freshly matched):
-   quality gate (`min_face_px`, Laplacian blur `min_blur_var`) -> crop (25% margin) -> `embedder.embed` -> `gallery.match`.
-   - sim >= `match_threshold` -> recognized existing `face_id`.
-   - else collect embeddings; after `min_embeds_to_register` unmatched embeddings, average them, re-check the gallery, then **register a new face**.
-   - Each stored embedding also saves a tight close-up crop (`logs/faces/...`) and stores its path in `embeddings.image_path`;
-     the first one becomes `faces.image_path` (registered close-up).
-4. Entry/exit ownership + **presence visit state machine** (`src/presence.py`):
-   - Identity resolved and nobody owns it -> track owns it -> **ENTRY** + open `visits` row.
-   - Owner exists but is stale -> **handover** (no entry/exit).
-   - Owner is live -> `DUPLICATE_TRACK`.
-   - Owning track lost -> visit moves to **HIDDEN** (not EXIT). Grace is **seconds**, chosen by
-     edge exit / mid-frame stationary / default (+ occlusion multiplier). `EXIT` uses `last_seen_ts`.
-   - Same face before deadline -> **VISIT_RESUMED** (gap added to `occluded_seconds`).
-   - Deadline / stream_end / stream_gap -> one **EXIT**. Lost tracks sit in a rematch pool.
-   - Optional BODY_ONLY keep-alive when person-detector still overlaps the last box.
-   - Mass loss / brightness jump / stream gaps freeze hidden deadlines (`DISTURBANCE_*`).
-5. Each event writes, in this order: crop image (atomic tmp+rename) -> DB row (one transaction, also updates `faces.last_seen/visit_count`) -> `events.log` line.
-   Log events include: `VISIT_HIDDEN`, `VISIT_RESUMED`, `IDENTITY_MISMATCH`, `DISTURBANCE_START/END`, `TRACK_LOST` (DEBUG).
-   `EXIT_PENDING` was merged into `VISIT_HIDDEN` (do not reintroduce a duplicate pending line).
-   Time: `src/clock.py` — `wall_now()` for all stored/logged stamps; `mono()` for durations only;
-   convert with `wall_from_mono(instant)`. Never add monotonic values to wall time.
+Layers: `python backend/scripts/check_layers.py`. Paths via `src.core.paths.PROJECT_ROOT`.
 
-### Count definitions
-- **Unique visitors** = rows in `faces` = distinct `face_id` on `FACE_REGISTERED` (one session). `FACE_RECOGNIZED` / re-entries never change it. Away walkers are not included.
-- **Entries / exits** = `events` rows by type = `ENTRY`/`EXIT` log lines. **Returning** = `visit_count > 1`. **Open visits** = entries without exits.
+## 4. Pipeline (do not break)
 
-### Invariants — do not break these
-- Exactly one `entry` and one `exit` per visit; unique count = rows in `faces`; returning person never creates a new `faces` row.
-- **DB count and log-derived count must agree** (enforced by `python scripts/count.py` / `tests/test_counting.py` in CI-style checks). `src/counting.py` is the shared implementation; `GET /api/count` exposes it.
-- Identity is never created from a poor-quality frame or from a single embedding (`min_embeds_to_register`).
-- `reset_on_start` happens once per session (never between videos in a multi-video run).
-- **Single clock source:** all `events.timestamp` / `last_seen` / image folder dates / ENTRY·EXIT `ts=` come from wall clock (ISO-ms). Monotonic is durations-only.
-- **Every log line has `sid=<session_id>`** (first key=value). When `reset_on_start` / `--fresh`, archive prior `events.log` (+ `away_events.log`) so the log and DB describe the same session; exactly one `SYSTEM_STOP` per start.
-- **Crash recovery** (`reset_on_start=false` / `--no-reset`): each leftover open visit gets **one EXIT** at `faces.last_seen` with `reason=crash_recovery` (+ `SESSION_RECOVERED`). Never invent a synthetic ENTRY.
-- `events.log` must contain: TRACK_STARTED/ENDED (paired), EMBEDDING_GENERATED, FACE_REGISTERED (`face_id`,`unique_total`,`track`), FACE_RECOGNIZED, ENTRY (`entry_kind=new|re_entry`) plus companion NEW_ENTRY / RE_ENTRY, EXIT, COUNT_SNAPSHOT; STREAM_END carries `new_faces`/`unique_so_far`. AWAY_* live in `away_events.log`. Unique counting still keys off ENTRY/EXIT + `faces` rows — NEW_ENTRY/RE_ENTRY are audit labels only.
-- Heavy imports (ultralytics, insightface) stay inside `main.py`/detector/recognizer so tests run without models (dependency injection into the pipeline).
-- DB writes stay commit-per-write (resilience to interruption).
-- **Optional preprocess (OFF by default):** async worker downscales to detector size, auto-gates on brightness/contrast (dull/dark only), then frame filters. Detector input = enhanced if ready, else original (no wait on live). Boxes map back to original → tracker → crops from original. `quality_assist` is **not** a frame filter — only contrast on the 112×112 blur-gate crop from the original. Embeddings / live / away / disturbance always use the original. When disabled, detector path is a no-op. API write path: `PUT/POST /api/preprocess*` → `data/runtime/preprocess.json` only (never the DB).
+1. **Detect** every `detection_skip_frames+1` frames (else tracks coast).
+2. Optional **preprocess** → detector input = enhanced if ready else original; boxes **mapped back** to original.
+3. **ByteTrack-style** confirm after `min_hits`; drop after `max_lost_frames` / leave-frame.
+4. **Identify** (confirmed + freshly matched): size + blur gate → crop from **original** → embed → gallery.
+   - ≥ `match_threshold` → `FACE_RECOGNIZED`
+   - else collect embeds → after `min_embeds_to_register` → `FACE_REGISTERED`
+5. **Presence:** identity + no owner → **ENTRY**; lost → **HIDDEN** (grace seconds); return → **VISIT_RESUMED**; deadline/stream end → **EXIT** at `last_seen_ts`. Handover / BODY_ONLY / disturbance freeze as documented in code.
+6. **Write order:** crop (atomic) → DB → `events.log`. Clock: `wall_now()` for stamps; `mono()` for durations only.
 
-## 5. Config (`config.json`) — keys and meaning
-`video_source` / `video_sources[]`; `detection_skip_frames` (N = skip N frames between YOLO runs);
-`detector.{weights,weights_url,conf_threshold,imgsz,device}`; `recognition.{model_pack,det_size,match_threshold(0.45),max_embeddings_per_face,
-min_embeds_to_register,embed_retry_interval,max_embed_attempts}`; `quality.{min_face_px,min_blur_var}`;
-`tracker.{high_conf,new_track_conf,iou_threshold,min_hits,max_lost_frames}`; `storage.{backend,postgres,log_dir,events_log,reset_on_start}`
-(committed defaults: `backend=postgres`, `reset_on_start=false`, `postgres={}` — **no DSN in config**; DSN only via `DATABASE_URL` / `TRACKER_DSN`; missing/unreachable DB → hard error, no SQLite fallback; face crops + `events.log` stay under `logs/`; dashboard Start keeps faces/logs unless the clear checkbox is on; use `--fresh` for a clean CLI wipe);
-`stream.{reconnect_delay_sec,max_reconnects,read_timeout_sec,realtime,catch_up_drop,stream_gap_seconds}`
-(`catch_up_drop` default **true**: file playback skips ahead when CPU is behind so the live UI stays near realtime);
-`output.{display,annotated_video}`;
-`logging.{level,separate_away_log,debug_events}` (AWAY_* → `logs/away_events.log` when separate);
-`away_walkers.enabled` default **true** (person YOLO → no-face KPI, excluded from unique faces);
-`appearance.enabled` default **false** in committed config.
-Live overlay: yellow/`…` = tracked face pending ID; green `ID N` = registered/recognized.
-Tuning guide: more false "new people" -> lower `match_threshold` or relax quality gate; different people merged -> raise `match_threshold`;
-false exits during occlusion -> raise `max_lost_frames`; slow -> raise `detection_skip_frames`, lower `imgsz`
-(or keep `catch_up_drop=false` and accept slower-than-realtime preview).
+### Counts
 
-## 6. Database schema (local Postgres required; SQLite for unit tests only)
-Runtime requires **local Postgres**: `docker compose up -d db`, then set `DATABASE_URL=postgresql://facetrack:facetrack@localhost:5432/facetrack` in `.env` only (never commit the DSN). `src/db_bootstrap.open_database` opens Postgres and raises `DatabaseError` if the DSN is missing or connect fails — **no SQLite fallback**. Face crops and `events.log` remain on the local filesystem under `logs/`.
-- `faces(face_id PK, first_seen, last_seen, visit_count, image_path)`
-- `embeddings(id PK, face_id FK, vector BYTEA/BLOB float32[512], created_at, image_path)`
-- `events(..., visit_id nullable)` — still exactly one entry and one exit per visit
-- `visits(visit_id, face_id, entry_ts, exit_ts, visible_seconds, occluded_seconds, resume_count, exit_reason)`
-  - `time_in_frame = visible + occluded` per visit; person total sums visits
-- Open via `src.db_bootstrap.open_database`; tests keep `Database(path, reset=True)` (SQLite).
+| Metric | Definition |
+|---|---|
+| Unique | `COUNT(*)` from `faces` |
+| Entries / exits | `events` rows `ENTRY` / `EXIT` |
+| Returning | `visit_count > 1` |
+| Inside / open | entries without exits (`visits.exit_ts IS NULL`) |
 
-## 7. API (`backend/api/server.py`, run from repo root: `uvicorn api.server:app --app-dir backend --port 8000`)
-`GET /api/health, /api/summary, /api/count?session=latest, /api/timeline, /api/visitors, /api/visitors/{id}, /api/visitors/{id}/embeddings, /api/events?type=&face_id=&limit=&offset=, /api/logs?limit=&event=&level=&q=&source=events|away, /api/tracker/status, /api/assistant/status`;
-`POST /api/tracker/start` `{url, reset?}`, `POST /api/tracker/stop` — dashboard RTSP job (background YOLO+InsightFace pipeline);
-`POST /api/assistant/chat` — optional Groq SSE **ARIA** assistant (tools via `api/services.py` + `api/assistant_tools.py`); disabled/503 without `GROQ_API_KEY`.
-ARIA rules: **read-only** (never changes settings/data/tracker); tool results carry preformatted fields + `plain_summary`; live snapshot injected every turn; inline tags / nav actions are **server-validated whitelists** only; no images/embeddings sent to Groq.
-images under `/media/...` (from `logs/`); serves `frontend/dist` at `/` if built. Read-only connections. Image paths in the DB are
-relative to `PROJECT_ROOT` (forward slashes). Env overrides: `TRACKER_CONFIG`, `DATABASE_URL` / `TRACKER_DSN` (required Postgres), `TRACKER_LOG_DIR`, `TRACKER_EVENTS_LOG`, `GROQ_API_KEY`, `GROQ_MODEL`, `ASSISTANT_ENABLED`.
-DB open path: `src/db_bootstrap.open_database` — Postgres only; missing/unreachable → `DatabaseError` + `/api/health` `ok=false` (secrets redacted). Logs `DB_BACKEND backend=postgres` (never `DB_FALLBACK`).
-Shared analytics: `api/services.AnalyticsService` (used by assistant tools; HTTP routes still have local helpers).
-API SQL uses `?` placeholders; `Database.readonly()` adapts to `%s` for Postgres. `PRAGMA` / `lastrowid` stay inside `src/database.py` (sqlite test path only). Timestamps are TEXT; `api` `_secs`/`secs` accept ISO `T` or space-separated and `datetime` objects.
+Away walkers are **not** unique faces.
 
-## 8. Frontend (`frontend/`)
-Vite + React 18 + TS + Recharts. `src/api/` (client + `usePolling`), pages `Overview/Visitors/Events/Logs/…`,
-components `Layout, KpiCard, ActivityChart, VisitorDrawer, LiveMonitor, assistant/*`, brand assets in `public/brand/`. Plain CSS in `styles.css`.
-Dev: `make api` + `make web` (or `cd frontend && npm run dev`, proxy to :8000). Build: `make build-web`.
+### Invariants
 
-## 9. Run / test commands
+- One entry + one exit per visit; returning person never new `faces` row.
+- DB count and log-derived count must agree (`counting.py`, `scripts/count.py`, `GET /api/count`).
+- No identity from bad frames or a single embed.
+- Every log line has `sid=<session_id>`; archive logs on wipe (`--fresh` / clear checkbox).
+- Crash recovery: one EXIT at `last_seen`, never invent ENTRY.
+- Preprocess OFF by default; when on, **never** feeds embeddings/crops/live/away/disturbance.
+- `quality_assist` = blur-gate 112×112 gray only (not a frame filter).
+- Heavy ML lazy; pipeline injectable for tests.
+- Runtime Postgres only (`DATABASE_URL`); no SQLite fallback; no DSN in `config.json`.
+
+## 5. Config (`config.json`)
+
+Important keys (committed values may differ slightly — open the file):
+
+- `detection_skip_frames`, `detector.*`, `recognition.match_threshold` (committed **~0.52**), `quality.*`
+- `tracker.*`, `presence.*` (grace seconds; `stationary >= exit >= edge`)
+- `storage.backend=postgres`, `reset_on_start=false`, `postgres={}`
+- `stream.realtime`, `catch_up_drop`, `process_max_width`
+- `away_walkers.enabled`, `appearance.enabled`, `preprocess.*` (all assist off by default)
+- DSN **only** via `.env` → `DATABASE_URL`
+
+**Tuning:** too many new IDs → lower match threshold or relax quality; merges → raise threshold; false exits → raise `max_lost_frames` / grace; slow → raise skip / lower `imgsz`.
+
+**Live overlay:** `…` = tracked pending ID; green `ID N` = known.
+
+## 6. Database
+
+`make db` then `DATABASE_URL` in `.env`.
+
+- `faces`, `embeddings` (512-d), `events`, `visits` (+ away_*)
+- Tests may use SQLite via `Database(path, reset=True)`; production path is `open_database` → Postgres only.
+
+## 7. API
+
+`uvicorn api.server:app --app-dir backend --port 8000`
+
+- Read: `/api/health`, `/summary`, `/count`, `/timeline`, `/visitors`, `/events`, `/logs`, `/tracker/status`, `/assistant/status`, `/preprocess`, `/preprocess/preview`, live JPEG
+- Write: `/api/tracker/start|stop`, `/api/preprocess` PUT + reset (runtime JSON only), `/api/assistant/chat` (SSE)
+- Serves `/media` from `logs/` and `frontend/dist` when built
+- ARIA: read-only tools; no images/embeddings to Groq
+
+## 8. Frontend
+
+Vite + React + TS. Pages: Overview, Live Monitor, Registered Faces, Event Logs, Analytics, Configuration, System Log. ARIA pill / Ctrl+K. Dev: `make api` + `make web` (:5173).
+
+## 9. Commands
+
 ```bash
-pip install -r backend/requirements.txt && pip install -r backend/requirements-api.txt
-python main.py --config config.json                                  # shim → backend/main.py
-python main.py --fresh --config config.json
-python main.py --sources data/videos/v1.mp4 data/videos/v2.mp4
-python main.py --source rtsp://user:pass@host:554/stream --display
-python backend/scripts/count.py --source both --session latest
-python backend/scripts/verify_log.py
-python backend/scripts/final_check.py
-python backend/scripts/report.py --db data/db/visitors.db --csv-dir samples
-pytest -q
-python backend/scripts/seed_demo.py   # fake demo → data/demo/
-uvicorn api.server:app --app-dir backend --port 8000
-cd frontend && npm install && npm run build
-# or: make install / make run / make api / make web / make test
+make install && make db && cp .env.example .env
+make run          # or: python3 main.py
+make fresh        # wipe session
+make api          # :8000
+make web          # :5173
+make test         # pytest -q
+make count        # DB ↔ log
+make check        # final_check.py
+make rtsp         # paste URL runner
 ```
 
-## 10. Known limitations / honest gaps
-1. Real-model behaviour unverified; thresholds (0.45 match, quality gates, `max_lost_frames`) are starting guesses.
-2. ENTRY is logged when identity is confirmed (~2 good embeddings), so it lags first appearance by ~1 s; EXIT uses last real detection (`last_seen`)
-   after the presence grace. Timestamps are wall-clock processing time (not video PTS); mono is durations-only.
-3. Faces that never pass the quality gate / never embed are silently not counted (by design, but small background faces are missed).
-4. `frame_idx` restarts per video in multi-video sessions; `Track._next_id` is process-global (fine, just not reset).
-5. Tracker is IoU+velocity only (no appearance model); fast motion/heavy occlusion can fragment tracks (handover logic mitigates).
-6. API recomputes stats from full tables on each request (fine for hackathon scale); no auth, CORS `*`.
-7. Dashboard not visually verified in a browser; bundle ~620 kB (no code-splitting).
-8. `docs/PROMPTS.md`, README video link and README "Sample output" section are placeholders to fill.
+## 10. Limitations (honest)
 
-## 11. NEXT STEPS (priority order, each with acceptance criteria)
+1. Thresholds need footage-specific tuning.
+2. ENTRY lags first sight until enough good embeds; EXIT uses `last_seen` after grace.
+3. Faces that never pass quality/embed are not counted (by design).
+4. Tracker is IoU+velocity (appearance assist optional / separate).
+5. API is hackathon-scale (full-table stats, open CORS).
+6. README still needs the **video link** and filled **sample output** after your submission run.
 
-### P0 — before the Nov 8 6 PM deadline (do these first)
-1. **Run on the real sample video(s)** and inspect `output/annotated.mp4`. Acceptance: no obvious duplicate IDs for one person, no merged people;
-   record final unique count; `entries == exits`. Tune `config.json` only (do not change logic first).
-2. **Presence / visit state machine (done in code; verify on real video).** Time-based grace, last_seen EXIT,
-   visits table, disturbance freeze, lost-pool rematch. Acceptance on real clips: entries≈exits, short re-entries ≈0
-   (`python scripts/presence_report.py --db data/visitors.db`).
-3. **Verify RTSP**: test with a phone/IP-cam or `ffmpeg`/MediaMTX loop of the sample video. Acceptance: reconnect after killing the stream; no
-   growing latency (reader keeps only the latest frame); log lines `Stream read failed; reconnecting`.
-4. **Generate submission artifacts**: `python scripts/report.py --csv-dir samples`; commit `logs/` (events.log + some crops) and `samples/`; fill README "Sample output".
-5. **Record the Loom/YouTube demo** (show: architecture, config skip param, run, annotated video, events.log, DB query, dashboard) and paste the link in README.
-6. **Fill `docs/PROMPTS.md`** with the real prompts used and what you verified; be ready to explain `pipeline.py`, `tracker.py`, thresholds.
-7. Confirm README last line is exactly the katomaran sentence and the form submission is made.
+## 11. Before submit (P0)
 
-### P1 — quality improvements (after P0)
-- Use **video time** for file sources (`frame_idx / fps`) as an optional timestamp mode (`config.timestamps: "wall"|"video"`), keeping wall-clock for RTSP.
-- **ID-switch guard:** re-verify an identified track every K detection cycles; if embedding strongly disagrees (< threshold) for several checks, log
-  `IDENTITY_MISMATCH` and re-identify (end old visit, start new). Add a synthetic test where two squares cross.
-- **Appearance-aided tracking**: add embedding similarity into association, or swap `ByteTrackLite` for ultralytics/`supervision` ByteTrack while keeping the
-  `update(dets, frame_size) -> (active, removed)` interface and Track fields used by `pipeline.py`.
-- Better embedding quality: pose/aligned-crop filtering using InsightFace landmarks; use best-of-N frame for the registered close-up.
-- Config schema validation (fail fast with clear messages) and a `--dry-run` that checks weights/RTSP connectivity.
+1. Clean run on sample / webcam / RTSP — unique stable, entries ≈ exits.
+2. Export samples (`report.py`), keep representative `logs/` crops.
+3. Paste Loom/YouTube into README; fill sample output.
+4. Rehearse explaining pipeline, presence, preprocess split, counting, ARIA from [`PROMPTS.md`](PROMPTS.md).
+5. Confirm README last line + form submission.
 
-### P2 — dashboard / platform polish (keep it simple, no over-engineering)
-- Live preview: MJPEG endpoint streaming the annotated frame (new route in `api/` + `<img>` on Overview).
-- Date/time range filter and CSV export buttons (`/api/export/events.csv`); dwell-time histogram on Overview.
-- Visitor drawer: show entry/exit crops side by side; "merge suspicious identities" view driven by the similar-identities list.
-- Code-split the bundle (`React.lazy` per page); basic auth token for the API; Dockerfile + docker-compose (tracker + api).
-- GitHub Actions: run `pytest` and `npm run build`.
+## 12. Edit rules
 
-### P3 — ideas
-Multi-camera support (camera_id column), alerting webhooks, privacy options (hash embeddings, retention policy).
-
-## 12. Working agreements for AI assistants editing this repo
-- Keep modules small and commented; no new heavy dependencies without a reason. Python 3.9-3.11, type hints where cheap.
-- Any change to `pipeline.py` or `tracker.py` must keep `pytest` green and add/adjust a synthetic test (fake detector/embedder pattern in `tests/test_pipeline.py`).
-- Do not change DB schema without adding a migration in `Database._migrate`.
-- Never write demo/fake data into the real `data/` or `logs/` folders.
-- Do not mark anything "verified" unless it was actually run; state what was and was not tested.
-- Windows-friendly paths (use `pathlib`), no shell-specific assumptions in code.
+- Keep invariants; add/adjust synthetic tests for pipeline/tracker changes.
+- Schema changes → migration in `Database._migrate` / `schema.py`.
+- Never dump demo data into real `data/` or `logs/`.
+- Do not claim verified unless you ran it.
+- Prefer `pathlib`; Python 3.9–3.11.
