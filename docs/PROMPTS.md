@@ -23,9 +23,3 @@ Planning and implementation prompts that shaped the system. Each row is a real d
 4. **Observable system** — count audit, COUNT_SNAPSHOT, ARIA read-only tools, Original/Enhanced preview.
 5. **Test without GPUs** — inject fake detector/embedder; keep heavy ML imports lazy.
 
-## How to talk through this in review
-
-- Walk prompt **1 → 2 → 4**: architecture → presence → countable truth.
-- Walk prompt **6**: why enhanced never feeds InsightFace or saved crops.
-- Walk prompt **7**: what ARIA can and cannot do (read-only, no embeddings uploaded).
-- Point at `docs/ARCHITECTURE.md` + the README diagram for the end-to-end picture.
