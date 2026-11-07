@@ -23,6 +23,9 @@ Makefile          install / run / api / web / test helpers
 Root keeps only entry/config/docs-adjacent files so `python main.py` and relative log paths stay stable. Python imports still use `src.*` / `api.*` with `pythonpath=backend`.
 
 ## Architecture
+
+![VYRON architecture](docs/assets/vyron-architecture.png)
+
 ```mermaid
 flowchart LR
     A[Video file / RTSP] --> B[FrameSource<br/>threaded + auto-reconnect]
