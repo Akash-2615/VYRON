@@ -1685,17 +1685,6 @@ select, .search input, .assistant-composer textarea {
   width: 18px; height: 18px; border-radius: 6px; object-fit: cover; flex-shrink: 0;
   box-shadow: 0 0 12px var(--primary-glow);
 }
-.assistant-pill-kbd {
-  font: inherit;
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: .04em;
-  padding: 2px 6px;
-  border-radius: 999px;
-  color: var(--muted);
-  background: color-mix(in srgb, var(--bg) 55%, transparent);
-  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
-}
 [data-theme="light"] .assistant-pill {
   background:
     linear-gradient(135deg,
@@ -1706,9 +1695,6 @@ select, .search input, .assistant-composer textarea {
 }
 @media (prefers-reduced-motion: reduce) {
   .assistant-pill, .assistant-pill-shimmer { animation: none !important; }
-}
-@media (max-width: 720px) {
-  .assistant-pill-kbd { display: none; }
 }
 .drawer-with-assistant .drawer { right: var(--aria-width, 420px); }
 .drawer-with-assistant .overlay { right: var(--aria-width, 420px); }

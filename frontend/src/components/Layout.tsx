@@ -209,9 +209,6 @@ export default function Layout({
                 <span className="assistant-pill-shimmer" aria-hidden="true" />
                 <img className="assistant-pill-logo" src="/favicon.png" alt="" width={18} height={18} />
                 <span>ARIA</span>
-                <kbd className="assistant-pill-kbd">
-                  {typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘K" : "Ctrl+K"}
-                </kbd>
               </button>
             )}
             <time className="topbar-clock" dateTime={clock.toISOString()} title={updatedAt ? `Data updated ${updatedAt.toLocaleTimeString()}` : undefined}>
