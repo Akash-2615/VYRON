@@ -1,27 +1,24 @@
 {
-  "video_source": "data/sample_video.mp4",
+  "video_source": "data/videos/sample_video.mp4",
   "video_sources": [],
   "detection_skip_frames": 2,
-
   "detector": {
-    "weights": "models/yolov8n-face.pt",
+    "weights": "data/models/yolov8n-face.pt",
     "weights_url": "https://github.com/akanametov/yolo-face/releases/download/1.0.0/yolov8n-face.pt",
     "conf_threshold": 0.22,
     "imgsz": 640,
     "device": "auto"
   },
-
   "retina_face": {
     "enabled": true,
     "conf_threshold": 0.35,
     "det_size": 640,
     "device": "auto",
     "verify_below_conf": 0.45,
-    "verify_iou": 0.30,
+    "verify_iou": 0.3,
     "fallback_on_empty": true,
     "model_path": ""
   },
-
   "recognition": {
     "model_pack": "buffalo_l",
     "det_size": 640,
@@ -31,12 +28,10 @@
     "embed_retry_interval": 1,
     "max_embed_attempts": 12
   },
-
   "quality": {
     "min_face_px": 16,
     "min_blur_var": 12.0
   },
-
   "appearance": {
     "enabled": false,
     "model": "ViT-B-32",
@@ -45,7 +40,6 @@
     "min_crop_px": 48,
     "describe_on_register": true
   },
-
   "away_walkers": {
     "enabled": true,
     "require_facing_away": false,
@@ -57,23 +51,22 @@
     "reentry_grace_sec": 30.0
   },
   "person_detector": {
-    "weights": "yolov8n.pt",
+    "weights": "data/models/yolov8n.pt",
     "conf_threshold": 0.42,
     "imgsz": 512,
     "device": "auto",
     "min_height_px": 60,
     "min_width_px": 20,
-    "min_aspect": 1.10,
+    "min_aspect": 1.1,
     "max_aspect": 5.5
   },
   "away_tracker": {
-    "high_conf": 0.40,
-    "new_track_conf": 0.40,
+    "high_conf": 0.4,
+    "new_track_conf": 0.4,
     "iou_threshold": 0.22,
     "min_hits": 2,
     "max_lost_frames": 30
   },
-
   "tracker": {
     "high_conf": 0.35,
     "new_track_conf": 0.28,
@@ -83,7 +76,6 @@
     "reentry_grace_frames": 75,
     "reentry_grace_sec": 25.0
   },
-
   "presence": {
     "exit_grace_seconds": 10,
     "edge_exit_grace_seconds": 2,
@@ -100,13 +92,11 @@
     "exit_zones": []
   },
   "timestamps": "auto",
-
   "logging": {
     "level": "INFO",
     "separate_away_log": true,
     "debug_events": false
   },
-
   "storage": {
     "backend": "postgres",
     "postgres": {},
@@ -114,7 +104,6 @@
     "events_log": "logs/events.log",
     "reset_on_start": false
   },
-
   "stream": {
     "reconnect_delay_sec": 3,
     "max_reconnects": 0,
@@ -123,11 +112,10 @@
     "catch_up_drop": true,
     "stream_gap_seconds": 1.5
   },
-
   "output": {
     "display": false,
     "annotated_video": "",
-    "live_preview": "output/live.jpg",
+    "live_preview": "data/runtime/live.jpg",
     "live_jpeg_quality": 85,
     "live_max_width": 0,
     "live_every_n_frames": 2

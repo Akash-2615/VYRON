@@ -8,9 +8,9 @@ Old import paths remain via module-alias shims (see `src/*.py` files marked depr
 ```mermaid
 flowchart BT
   subgraph entry["Entrypoints"]
-    main["main.py / run_rtsp.py"]
-    scripts["scripts/*"]
-    api_entry["api.server:app"]
+    main["backend/main.py / backend/scripts/run_rtsp.py"]
+    scripts["backend/scripts/*"]
+    api_entry["api.server:app (--app-dir backend)"]
   end
   subgraph api_layer["api/"]
     routers["routers / assistant"]
@@ -80,7 +80,7 @@ sequenceDiagram
 
 ## Rules
 
-- Lower layers never import higher ones (`scripts/check_layers.py`).
+- Lower layers never import higher ones (`backend/scripts/check_layers.py`).
 - Heavy ML imports stay lazy inside detector / recognizer / appearance / retina constructors.
 - Pipeline stays injectable (detector/embedder passed in) for tests without models.
 - Do not change log event names, DB schema, API paths, or CLI flags while moving code.

@@ -7,6 +7,21 @@ and maintains a **unique visitor count** that does not grow when the same person
 ## Demo video
 **Loom / YouTube:** `<ADD LINK HERE>`  (required by the evaluators)
 
+## Project structure
+```
+backend/          Python tracker + FastAPI + scripts + tests (package names src/api unchanged)
+frontend/         Vite React dashboard (src/api, pages, components, public/brand)
+data/             videos, models, db, runtime, demo (local; mostly gitignored)
+deploy/           docker-compose Postgres, MediaMTX, local certs
+docs/             KNOWLEDGE, ARCHITECTURE, PROMPTS
+logs/             session events + crops (submission deliverable; stays at root)
+samples/          CSV / export samples (stays at root)
+config.json       runtime config (stays at root so paths match PROJECT_ROOT)
+main.py           thin shim → backend/main.py (same CLI flags)
+Makefile          install / run / api / web / test helpers
+```
+Root keeps only entry/config/docs-adjacent files so `python main.py` and relative log paths stay stable. Python imports still use `src.*` / `api.*` with `pythonpath=backend`.
+
 ## Architecture
 ```mermaid
 flowchart LR
@@ -90,21 +105,22 @@ A read-only web dashboard over the same PostgreSQL DB, image store and `events.l
 Data refreshes every 3 s (pause button in the top bar).
 
 ```bash
-pip install -r requirements-api.txt
+pip install -r backend/requirements-api.txt
 cp .env.example .env   # optional: set GROQ_API_KEY for the assistant
-cd web && npm install && npm run build && cd ..      # one-time build
-uvicorn api.server:app --port 8000                   # run from the repo root -> open http://localhost:8000
+cd frontend && npm install && npm run build && cd .. # one-time build
+uvicorn api.server:app --app-dir backend --port 8000  # -> http://localhost:8000
+# or: make api / make web / make build-web
 ```
-Dev mode with hot reload: run `uvicorn` as above, then `cd web && npm run dev` (http://localhost:5173, proxies to :8000).
-The dashboard can run while `main.py` is processing (Postgres / SQLite allow concurrent readers).
+Dev mode with hot reload: run `uvicorn` as above, then `cd frontend && npm run dev` (http://localhost:5173, proxies to :8000).
+The dashboard can run while `main.py` is processing (Postgres allows concurrent readers).
 Without `GROQ_API_KEY` the API and dashboard still start; the assistant panel shows setup instructions. Model names change — check the Groq console and set `GROQ_MODEL` if needed (default `llama-3.3-70b-versatile`).
 
 No results yet? Preview with clearly fake demo data (written to `demo/`, never touches your real DB):
 ```bash
-python scripts/seed_demo.py
-DATABASE_URL=postgresql://… TRACKER_LOG_DIR=demo/logs uvicorn api.server:app --port 8000
+python backend/scripts/seed_demo.py
+DATABASE_URL=postgresql://… TRACKER_LOG_DIR=data/demo/logs uvicorn api.server:app --app-dir backend --port 8000
 ```
-Stack: FastAPI (`api/server.py`) -> React 18 + TypeScript + Vite + Recharts (`web/`). Endpoints: `/api/summary`, `/api/timeline`,
+Stack: FastAPI (`backend/api/server.py`) -> React 18 + TypeScript + Vite + Recharts (`frontend/`). Endpoints: `/api/summary`, `/api/timeline`,
 `/api/visitors`, `/api/visitors/{id}`, `/api/visitors/{id}/embeddings`, `/api/events`, `/api/logs`, `/api/assistant/*`, `/api/tracker/*`, images under `/media`.
 
 ## Developing further (Cursor / AI tools)
@@ -113,9 +129,9 @@ Give `docs/KNOWLEDGE.md` to your AI assistant (rules file already at `.cursor/ru
 ## Setup
 ```bash
 python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
-pip install -r requirements.txt                         # GPU: replace onnxruntime with onnxruntime-gpu
-# put the provided sample video at data/sample_video.mp4  (or set video_source in config.json)
-# docker compose up -d db   # local Postgres
+pip install -r backend/requirements.txt                         # GPU: replace onnxruntime with onnxruntime-gpu
+# put the provided sample video at data/videos/sample_video.mp4  (or set video_source in config.json)
+# docker compose -f deploy/docker-compose.yml up -d db
 # Copy .env.example → .env (DATABASE_URL points at localhost) — required.
 python main.py --config config.json
 # Clean slate: archive events.log + away_events.log, wipe the active DB, then start
@@ -126,43 +142,43 @@ Defaults in `config.json`: `storage.backend=postgres`, `reset_on_start=false` (S
 Postgres DSN is **not** stored in `config.json` — set `DATABASE_URL` (or `TRACKER_DSN`) in a gitignored `.env` only.
 Without a working DB the API/CLI raise an error (no SQLite fallback). Face crops and `events.log` stay under `logs/`.
 Use the dashboard **Clear registered faces** checkbox, or `python main.py --fresh`, for a clean wipe.
-Never commit `.env`, `.venv/`, `Video Datasets/`, or a real `DATABASE_URL` (all gitignored).
+Never commit `.env`, `.venv/`, `data/videos/`, or a real `DATABASE_URL` (all gitignored).
 
 ### Interview (RTSP) — paste the link in the dashboard
 ```bash
 # 1) build UI once, then start API
 cd web && npm install && npm run build && cd ..
-uvicorn api.server:app --port 8000
+uvicorn api.server:app --app-dir backend --port 8000
 # 2) open http://127.0.0.1:8000 → Overview → paste rtsp://… → Start
 ```
 That starts detect → track → embed → entry/exit logging on the backend; the Live monitor shows the annotated stream.
 
-CLI alternative (no browser): `python run_rtsp.py "rtsp://USER:PASS@CAMERA_IP:554/STREAM_PATH"`
+CLI alternative (no browser): `python backend/scripts/run_rtsp.py "rtsp://USER:PASS@CAMERA_IP:554/STREAM_PATH"`
 
-- YOLO face weights auto-download to `models/yolov8n-face.pt` on first run (or place any YOLOv8 face model there).
+- YOLO face weights auto-download to `data/models/yolov8n-face.pt` on first run (or place any YOLOv8 face model there).
 - InsightFace `buffalo_l` models auto-download to `~/.insightface` on first run.
 - On Windows, `insightface` may need *Microsoft C++ Build Tools*; Python 3.9–3.11 is the safest.
 
 **Multiple videos, one combined unique count:**
 ```bash
-python main.py --sources data/video1.mp4 data/video2.mp4 data/video3.mp4
+python main.py --sources data/videos/video1.mp4 data/videos/video2.mp4 data/videos/video3.mp4
 ```
 Videos run in order as a single session: one DB (reset once at the start), one face gallery, so a person seen in several videos
 is counted once. Each video's open visits are closed at its end (exit events), and a person reappearing in the next video logs a
-new entry under the same `face_id`. Annotated videos are written per source (`output/annotated_<video>.mp4`).
+new entry under the same `face_id`. Annotated videos are written per source (`data/runtime/annotated_<video>.mp4`).
 Use `--no-reset` to keep an existing DB, or list the files under `"video_sources"` in `config.json`.
 
 **RTSP (interview):** `python main.py --source rtsp://user:pass@host:554/stream --display`
 
-**Results / export:** `python scripts/report.py --csv-dir samples`
+**Results / export:** `python backend/scripts/report.py --csv-dir samples`
 **Tests (no models needed):** `pytest -q`
 
 ## config.json
 ```json
 {
-  "video_source": "data/sample_video.mp4",
+  "video_source": "data/videos/sample_video.mp4",
   "detection_skip_frames": 2,
-  "detector":    { "weights": "models/yolov8n-face.pt", "conf_threshold": 0.30, "imgsz": 640, "device": "auto" },
+  "detector":    { "weights": "data/models/yolov8n-face.pt", "conf_threshold": 0.30, "imgsz": 640, "device": "auto" },
   "recognition": { "model_pack": "buffalo_l", "match_threshold": 0.45, "min_embeds_to_register": 2,
                    "embed_retry_interval": 2, "max_embed_attempts": 10, "max_embeddings_per_face": 5 },
   "quality":     { "min_face_px": 45, "min_blur_var": 35.0 },
@@ -179,7 +195,7 @@ Use `--no-reset` to keep an existing DB, or list the files under `"video_sources
     "log_dir": "logs", "events_log": "logs/events.log", "reset_on_start": false
   },
   "stream":      { "reconnect_delay_sec": 3, "max_reconnects": 0, "read_timeout_sec": 10 },
-  "output":      { "display": false, "annotated_video": "output/annotated.mp4" }
+  "output":      { "display": false, "annotated_video": "data/runtime/annotated.mp4" }
 }
 ```
 `detection_skip_frames = N` means: run YOLO on one frame, skip the next N. `max_lost_frames` is auto-raised if too small for N.
@@ -189,7 +205,7 @@ Presence grace must satisfy `stationary_grace >= exit_grace >= edge_exit_grace` 
 
 **File playback speed:** `stream.realtime=true` paces to the source FPS (never faster than 1×). `stream.catch_up_drop` defaults to `true` so when the CPU falls behind, file playback skips ahead and the live UI stays near realtime (set `false` for strict chronological, slower-than-realtime preview).
 
-**Database:** local Postgres only (`storage.backend=postgres`). Start with `docker compose up -d db`, then set `DATABASE_URL=postgresql://facetrack:facetrack@localhost:5432/facetrack` in `.env` (never commit the DSN). If the DSN is missing or unreachable, startup **raises** (no SQLite fallback). Face crops and `events.log` remain on the local filesystem under `logs/`. Overview / `/api/health` shows `backend=postgres`.
+**Database:** local Postgres only (`storage.backend=postgres`). Start with `docker compose -f deploy/docker-compose.yml up -d db`, then set `DATABASE_URL=postgresql://facetrack:facetrack@localhost:5432/facetrack` in `.env` (never commit the DSN). If the DSN is missing or unreachable, startup **raises** (no SQLite fallback). Face crops and `events.log` remain on the local filesystem under `logs/`. Overview / `/api/health` shows `backend=postgres`.
 
 ## Output layout
 ```
@@ -214,13 +230,13 @@ PostgreSQL (facetrack)                  # tables: faces, embeddings, events, vis
    ```
 2. **CLI (DB ↔ log reconcile):**
    ```bash
-   python scripts/count.py --source both
-   python scripts/verify_log.py
+   python backend/scripts/count.py --source both
+   python backend/scripts/verify_log.py
    ```
    Exit `0` = consistent, `1` = mismatch, `2` = could not compute.
 3. **Final hygiene check** (count + verify + date/session/AWAY/archive/secret scans):
    ```bash
-   python scripts/final_check.py
+   python backend/scripts/final_check.py
    ```
    Prints `PASS`/`FAIL` per check; exits `1` on any failure. Run after a clean `--fresh` session.
 4. **API:** `GET /api/count?session=latest` — DB when present, log fallback, plus `consistent` / `diffs`.
@@ -274,7 +290,7 @@ Away events (`AWAY_TRACK_STARTED/ENDED`, `AWAY_ENTRY/EXIT`, `AWAY_RESUMED`, …)
 - One camera; file and live sources both stamp events with **wall-clock processing time** (`src/clock.wall_now`); `time.monotonic` is only for grace durations.
 - `reset_on_start: false` is the committed default (keep faces/logs across restarts). Use the dashboard clear checkbox or `--fresh` to wipe.
 - `match_threshold` (0.45) is a starting point for `buffalo_l`; tune on your footage (higher = more unique IDs, lower = more merges).
-- Quality check: `python scripts/presence_report.py` (SQLite `db_path` or `DATABASE_URL`; entries should equal exits; short re-entries ≈ 0).
+- Quality check: `python backend/scripts/presence_report.py` (SQLite `db_path` or `DATABASE_URL`; entries should equal exits; short re-entries ≈ 0).
 
 ## Sample output
 Generated from the provided video (see `samples/`, `logs/`): `<ADD after running: counts, a few crops, DB export>`

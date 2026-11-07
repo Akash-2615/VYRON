@@ -8,31 +8,60 @@ venv/
 !.env.example
 
 # models & weights
-models/*.pt
 *.pt
 *.onnx
 
-# runtime data (keep folders via .gitkeep where needed)
-data/*.db
-data/*.db-*
-data/*.mp4
-logs/
-demo/
+# data layout (local assets)
+data/videos/
+data/models/
+data/db/
+data/runtime/
+data/demo/
+!data/models/.gitkeep
+!data/videos/.gitkeep
+!data/db/.gitkeep
+!data/runtime/.gitkeep
+!data/demo/.gitkeep
+!data/README.md
+
+# legacy path names (pre-structure)
+models/*.pt
+Video Datasets/
 output/
+demo/
+
+# logs: keep sample deliverables committable; ignore archive + bulky
+logs/archive/
+logs/**/*.jpg
+logs/**/*.jpeg
+logs/**/*.png
+# allow committing small sample crops if force-added; ignore rotated logs
+logs/*.log.*
+
+# samples: keep folder; ignore bulky CSV exports if needed
 samples/*.csv
+
+# golden snapshots
+backend/.golden/
 .golden/
 
-# video dataset (too large for git)
-Video Datasets/
-*.mp4
-
 # frontend
+frontend/node_modules/
+frontend/dist/
 web/node_modules/
 web/dist/
 
-# MediaMTX / certs
-auto.crt
-auto.key
+# videos
+*.mp4
+
+# deploy secrets / local mediamtx
+deploy/*.key
+deploy/*.crt
+deploy/*.pem
+*.key
+*.crt
+*.pem
+deploy/mediamtx.yml
 mediamtx.yml
 
 # OS / editor

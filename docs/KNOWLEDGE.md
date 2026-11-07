@@ -33,31 +33,30 @@ dashboard has not been viewed in a browser** (type-check and production build pa
 
 ## 3. Repository map
 ```
-config.json                 runtime config (see section 5)
-main.py                     CLI entry (flags unchanged)
-run_rtsp.py                 Interview helper
-src/core/                   config, clock
-src/session_svc/            session bootstrap / crash recovery
-src/event_logging/          EventLogger + crop store
-src/storage/                Database + schema DDL + open_database bootstrap
-src/detection/              YOLO face, RetinaFace, person YOLO
-src/recognition/            embedder, gallery, appearance
-src/tracking/               ByteTrackLite + IoU
-src/video_io/               FrameSource + live JPEG publisher
-src/presence/               visit state machine
-src/pipeline/               FaceTrackingPipeline + tracker_job
-src/reporting/              counting / reconcile / verify_log
-src/viz/                    overlay drawing
-src/*.py                    deprecated module-alias shims (old import paths)
-api/server.py               FastAPI create_app + routes (split pending)
-api/services.py             AnalyticsService
-scripts/                    thin CLIs + golden_snapshot.py + check_layers.py
-web/                        Vite + React dashboard
-docs/ARCHITECTURE.md        layer diagram + data flow
+config.json                 runtime config (repo root)
+main.py                     thin shim → backend/main.py
+Makefile / pyproject.toml   DX + pytest pythonpath=backend
+backend/                    Python root (packages src + api unchanged)
+  main.py                   CLI entry (flags unchanged)
+  src/core/                 config, clock, paths (PROJECT_ROOT)
+  src/session_svc/          session bootstrap / crash recovery
+  src/event_logging/        EventLogger + crop store
+  src/storage/              Database + schema + open_database
+  src/detection|recognition|tracking|video_io|presence|pipeline|reporting|viz/
+  api/                      FastAPI create_app + assistant + services
+  scripts/                  CLIs + golden_snapshot + check_layers + run_rtsp.py
+  tests/                    pytest suite
+frontend/                   Vite + React dashboard (was web/)
+  src/api/                  HTTP client + usePolling
+  src/pages/ | components/  screens + shared UI
+  public/brand/             logos / marks
+data/                       videos, models, db, runtime, demo (gitignored bulk)
+deploy/                     docker-compose, mediamtx, local certs
+docs/                       KNOWLEDGE, ARCHITECTURE, PROMPTS
+logs/  samples/             task deliverables (stay at root)
 ```
-Layer rules: `scripts/check_layers.py` (also `tests/test_layers.py`). See docs/ARCHITECTURE.md.
-Old paths (`from src.database import Database`, etc.) still work via shims.
-```
+Layer rules: `python backend/scripts/check_layers.py` (also `backend/tests/test_layers.py`). See docs/ARCHITECTURE.md.
+Old imports (`from src.database import Database`, etc.) still work via shims; run with `pythonpath=backend`.
 
 ## 4. How the pipeline works (read before editing `src/pipeline.py`)
 1. `process_frame(frame, idx)`: run YOLO only when `idx % (detection_skip_frames+1) == 0`; otherwise tracks coast on velocity.
@@ -127,36 +126,37 @@ Runtime requires **local Postgres**: `docker compose up -d db`, then set `DATABA
   - `time_in_frame = visible + occluded` per visit; person total sums visits
 - Open via `src.db_bootstrap.open_database`; tests keep `Database(path, reset=True)` (SQLite).
 
-## 7. API (`api/server.py`, run from repo root: `uvicorn api.server:app --port 8000`)
+## 7. API (`backend/api/server.py`, run from repo root: `uvicorn api.server:app --app-dir backend --port 8000`)
 `GET /api/health, /api/summary, /api/count?session=latest, /api/timeline, /api/visitors, /api/visitors/{id}, /api/visitors/{id}/embeddings, /api/events?type=&face_id=&limit=&offset=, /api/logs?limit=&event=&level=&q=&source=events|away, /api/tracker/status, /api/assistant/status`;
 `POST /api/tracker/start` `{url, reset?}`, `POST /api/tracker/stop` — dashboard RTSP job (background YOLO+InsightFace pipeline);
 `POST /api/assistant/chat` — optional Groq SSE assistant (tools via `api/services.py` + `api/assistant_tools.py`); disabled/503 without `GROQ_API_KEY`.
-images under `/media/...` (from `logs/`); serves `web/dist` at `/` if built. Read-only connections. Image paths in the DB are
-relative to the working directory, so the API must start from the repo root. Env overrides: `TRACKER_CONFIG`, `DATABASE_URL` / `TRACKER_DSN` (required Postgres), `TRACKER_LOG_DIR`, `TRACKER_EVENTS_LOG`, `GROQ_API_KEY`, `GROQ_MODEL`, `ASSISTANT_ENABLED`.
+images under `/media/...` (from `logs/`); serves `frontend/dist` at `/` if built. Read-only connections. Image paths in the DB are
+relative to `PROJECT_ROOT` (forward slashes). Env overrides: `TRACKER_CONFIG`, `DATABASE_URL` / `TRACKER_DSN` (required Postgres), `TRACKER_LOG_DIR`, `TRACKER_EVENTS_LOG`, `GROQ_API_KEY`, `GROQ_MODEL`, `ASSISTANT_ENABLED`.
 DB open path: `src/db_bootstrap.open_database` — Postgres only; missing/unreachable → `DatabaseError` + `/api/health` `ok=false` (secrets redacted). Logs `DB_BACKEND backend=postgres` (never `DB_FALLBACK`).
 Shared analytics: `api/services.AnalyticsService` (used by assistant tools; HTTP routes still have local helpers).
 API SQL uses `?` placeholders; `Database.readonly()` adapts to `%s` for Postgres. `PRAGMA` / `lastrowid` stay inside `src/database.py` (sqlite test path only). Timestamps are TEXT; `api` `_secs`/`secs` accept ISO `T` or space-separated and `datetime` objects.
 
-## 8. Frontend (`web/`)
-Vite + React 18 + TS + Recharts. `src/api.ts` (types + fetchers), `src/usePolling.ts` (3 s polling, pause), pages `Overview/Visitors/Events/Logs`,
-components `Layout, KpiCard, ActivityChart, VisitorDrawer (tabs), EmbeddingPanel, assistant/* (docked Groq chat), ui`. Plain CSS in `styles.css`.
-Dev: `uvicorn ...` + `cd web && npm run dev` (proxy to :8000). Build: `npm run build`. Keep it simple: no state libraries, no CSS frameworks.
+## 8. Frontend (`frontend/`)
+Vite + React 18 + TS + Recharts. `src/api/` (client + `usePolling`), pages `Overview/Visitors/Events/Logs/…`,
+components `Layout, KpiCard, ActivityChart, VisitorDrawer, LiveMonitor, assistant/*`, brand assets in `public/brand/`. Plain CSS in `styles.css`.
+Dev: `make api` + `make web` (or `cd frontend && npm run dev`, proxy to :8000). Build: `make build-web`.
 
 ## 9. Run / test commands
 ```bash
-pip install -r requirements.txt && pip install -r requirements-api.txt
-python main.py --config config.json                                  # one video (video_source)
-python main.py --fresh --config config.json                          # archive logs + reset active DB, then start
-python main.py --sources data/v1.mp4 data/v2.mp4                     # one combined unique count
-python main.py --source rtsp://user:pass@host:554/stream --display   # live
-python scripts/count.py --source both --session latest
-python scripts/verify_log.py
-python scripts/final_check.py                                        # PASS/FAIL hygiene; exit 1 on FAIL
-python scripts/report.py --db data/visitors.db --csv-dir samples
+pip install -r backend/requirements.txt && pip install -r backend/requirements-api.txt
+python main.py --config config.json                                  # shim → backend/main.py
+python main.py --fresh --config config.json
+python main.py --sources data/videos/v1.mp4 data/videos/v2.mp4
+python main.py --source rtsp://user:pass@host:554/stream --display
+python backend/scripts/count.py --source both --session latest
+python backend/scripts/verify_log.py
+python backend/scripts/final_check.py
+python backend/scripts/report.py --db data/db/visitors.db --csv-dir samples
 pytest -q
-python scripts/seed_demo.py   # fake demo data -> demo/
-DATABASE_URL=postgresql://… TRACKER_LOG_DIR=demo/logs uvicorn api.server:app --port 8000
-cd web && npm install && npm run build
+python backend/scripts/seed_demo.py   # fake demo → data/demo/
+uvicorn api.server:app --app-dir backend --port 8000
+cd frontend && npm install && npm run build
+# or: make install / make run / make api / make web / make test
 ```
 
 ## 10. Known limitations / honest gaps
