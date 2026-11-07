@@ -98,15 +98,38 @@ sequenceDiagram
 ## Optional preprocess (detector-only)
 
 ```mermaid
-flowchart LR
-  src[FrameSource original] --> pipe[Pipeline]
-  src -.->|async worker| pp[detection/preprocess.py]
-  pp -.->|enhanced + scale| det[Face detector]
-  pipe --> det
-  pipe --> emb[Embed / crops / preview / away / disturbance]
-  emb --> orig[Always original frame]
+flowchart TB
+  src[Frame source · original]
+  src --> pipe[Pipeline]
+  src --> worker
+
+  subgraph worker["Async preprocess worker"]
+    ds[Downscale to detector imgsz]
+    gate[Auto-gate dull/dark · brightness+contrast only]
+    filters[Denoise → WB → Gamma → CLAHE → Sharpen]
+    ds --> gate --> filters
+  end
+
+  settings[preprocess.json hot-reload] -.-> worker
+  worker --> metrics[Metrics → dashboard]
+  worker --> enh[Enhanced frame + scale]
+  src --> sel{Enhanced ready?}
+  enh -->|yes| sel
+  sel -->|yes| det[YOLOv8-face + RetinaFace assist]
+  sel -->|no / off / gate idle| det
+  det --> map[Map boxes → original coords]
+  map --> track[ByteTrack-style tracker]
+  track --> crop[Crops from original]
+  crop --> blur[Blur quality gate]
+  crop -.->|optional| qa[Quality-gate assist on 112×112 gray]
+  qa --> blur
+  crop --> emb[InsightFace embed · SCRFD inside pack]
+  pipe --> track
+  pipe --> preview[Live / crops / away / disturbance = original]
 ```
 
-- Settings: `config.json` `"preprocess"` (all off) overridden by `data/runtime/preprocess.json` (hot-reload ~1 s).
+- Frame filters never include `quality_assist` (blur-gate branch only).
+- No-lag: live never waits; detector takes original when enhanced is not ready.
+- Settings: `config.json` `"preprocess"` overridden by `data/runtime/preprocess.json` (hot-reload ~1 s).
 - API: `GET/PUT /api/preprocess`, `POST /api/preprocess/reset`, `GET /api/preprocess/preview`.
-- Dashboard: Configuration → Video preprocessing card.
+- Dashboard: Configuration → Video preprocessing card (preview panes: **Original** | **Enhanced**).

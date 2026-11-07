@@ -1,9 +1,13 @@
-"""Optional video preprocessing for dull / dark / noisy footage.
+"""Optional video preprocessing for dull / dark footage (detector assist).
 
-Runs only for the face-detector input (and optionally the blur quality gate).
-Embeddings, crops, preview, away detection, and disturbance stats always use
-the original frame. All steps are OFF by default — when disabled the pipeline
-path is a no-op (byte-identical to pre-feature behaviour).
+Frame filters (denoise / WB / gamma / CLAHE / sharpen) run in an async worker on a
+downscaled copy for the face detector only. ``quality_assist`` is NOT a frame filter —
+it only contrast-normalises the 112×112 grayscale crop used by the blur gate, cut from
+the original frame. Auto-gate measures brightness + contrast (dull / dark) only — not noise.
+
+Embeddings, crops, preview, away detection, and disturbance stats always use the original
+frame. All steps are OFF by default — when disabled the pipeline path is a no-op
+(byte-identical to pre-feature behaviour).
 """
 from __future__ import annotations
 
@@ -31,8 +35,9 @@ PREVIEW_REL = "data/runtime/preprocess_preview.jpg"
 STEP_CATALOG: List[Dict[str, Any]] = [
     {
         "name": "auto_gate",
-        "label": "Auto gate (dull only)",
-        "what": "Measures brightness and contrast on a small grayscale preview; enables the steps below only when the frame looks dull.",
+        "kind": "gate",
+        "label": "Auto gate (dull / dark)",
+        "what": "Measures brightness and contrast on a small grayscale preview; enables frame filters only when the frame looks dull or dark. Does not detect noise.",
         "why": "Avoids wasting work and changing already-good daylight footage.",
         "params": [
             {"key": "brightness_below", "label": "Brightness below", "type": "number", "min": 0, "max": 255, "default": 90, "unit": "mean"},
@@ -42,9 +47,10 @@ STEP_CATALOG: List[Dict[str, Any]] = [
     },
     {
         "name": "denoise",
+        "kind": "frame",
         "label": "Denoise",
         "what": "Light Gaussian or bilateral blur to calm grain.",
-        "why": "Grainy low-light CCTV; runs first so later steps do not amplify noise.",
+        "why": "Grainy low-light CCTV; runs first so later steps do not amplify noise. Optional — not part of the auto-gate metric.",
         "params": [
             {"key": "method", "label": "Method", "type": "select", "options": ["gaussian", "bilateral"], "default": "gaussian"},
             {"key": "strength", "label": "Strength", "type": "slider", "min": 0, "max": 1, "default": 0.35, "unit": ""},
@@ -52,6 +58,7 @@ STEP_CATALOG: List[Dict[str, Any]] = [
     },
     {
         "name": "white_balance",
+        "kind": "frame",
         "label": "White balance",
         "what": "Gray-world channel gain correction.",
         "why": "Colour-cast cameras; auto-skips near-grayscale / IR frames.",
@@ -62,6 +69,7 @@ STEP_CATALOG: List[Dict[str, Any]] = [
     },
     {
         "name": "gamma",
+        "kind": "frame",
         "label": "Gamma",
         "what": "LUT brightness curve (gamma < 1 brightens).",
         "why": "Cheapest fix for under/over-exposed footage.",
@@ -72,6 +80,7 @@ STEP_CATALOG: List[Dict[str, Any]] = [
     },
     {
         "name": "clahe",
+        "kind": "frame",
         "label": "CLAHE",
         "what": "Contrast-limited adaptive histogram equalisation on luminance (LAB L-channel).",
         "why": "Dull, hazy, or shadowed faces gain local contrast.",
@@ -82,6 +91,7 @@ STEP_CATALOG: List[Dict[str, Any]] = [
     },
     {
         "name": "sharpen",
+        "kind": "frame",
         "label": "Sharpen",
         "what": "Mild unsharp mask.",
         "why": "Soft / compressed video; last so it does not amplify earlier noise.",
@@ -92,8 +102,9 @@ STEP_CATALOG: List[Dict[str, Any]] = [
     },
     {
         "name": "quality_assist",
+        "kind": "blur_gate",
         "label": "Quality-gate assist",
-        "what": "Contrast-normalises the 112×112 grayscale crop used by the blur gate only.",
+        "what": "Not a frame filter. Contrast-normalises the 112×112 grayscale crop (from the original frame) used by the blur gate only.",
         "why": "Dull-but-real faces are less often rejected as blurry; embeddings still use the original crop.",
         "params": [],
     },
@@ -724,32 +735,46 @@ class PreprocessRuntime:
         if not settings.enabled:
             return
         now = time.time()
-        if now - self._last_preview_write < 2.0:
+        if now - self._last_preview_write < 1.5:
             return
         self._last_preview_write = now
         try:
             def thumb(img):
                 h, w = img.shape[:2]
-                scale = 320.0 / max(w, 1)
-                return cv2.resize(img, (max(1, int(w * scale)), max(1, int(h * scale))))
+                # Large enough for Config + Live compare panes.
+                scale = 900.0 / max(w, 1)
+                return cv2.resize(img, (max(1, int(w * scale)), max(1, int(h * scale))),
+                                 interpolation=cv2.INTER_AREA)
+
+            def label(img, text: str):
+                out = img.copy()
+                cv2.rectangle(out, (0, 0), (out.shape[1], 36), (18, 14, 28), -1)
+                cv2.putText(out, text, (12, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.75,
+                            (220, 210, 255), 2, cv2.LINE_AA)
+                return out
+
             a, b = thumb(original), thumb(enhanced)
             if a.shape[0] != b.shape[0]:
                 h = min(a.shape[0], b.shape[0])
                 a, b = a[:h], b[:h]
             if a.shape[1] != b.shape[1]:
-                # pad narrower
                 w = max(a.shape[1], b.shape[1])
+
                 def pad(x):
                     if x.shape[1] == w:
                         return x
                     out = np.zeros((x.shape[0], w, 3), dtype=np.uint8)
                     out[:, :x.shape[1]] = x
                     return out
+
                 a, b = pad(a), pad(b)
-            panel = np.hstack([a, b])
+            a = label(a, "ORIGINAL  (identity · live · crops)")
+            b = label(b, "ENHANCED  (detector input when ready)")
+            gap = np.full((a.shape[0], 4, 3), 40, dtype=np.uint8)
+            panel = np.hstack([a, gap, b])
             path = runtime_path("preprocess_preview.jpg")
             path.parent.mkdir(parents=True, exist_ok=True)
-            cv2.imwrite(str(path), panel, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+            cv2.imwrite(str(path), panel, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
         except Exception:  # noqa: BLE001
             log.debug("preprocess preview write failed", exc_info=True)
 

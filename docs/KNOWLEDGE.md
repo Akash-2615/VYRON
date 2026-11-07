@@ -29,7 +29,7 @@ dashboard has not been viewed in a browser** (type-check and production build pa
 | Multi-video session with one combined unique count (`--sources a.mp4 b.mp4`) | Built, unit-tested |
 | RTSP (TCP, threaded latest-frame reader, auto-reconnect) | Built; live path unit-tested; interview runner `run_rtsp.py` (paste URL only) |
 | FastAPI API + React/TS dashboard (Overview, Visitors w/ Face & Embedding tab, Event Log, System Log) | Built; demo data via `scripts/seed_demo.py`. **Read-only except** `PUT/POST /api/preprocess*` which may write only `data/runtime/preprocess.json` (never the DB). |
-| Optional video preprocess (dull/dark/noisy assist for detector only) | Built; OFF by default; async; originals used for crops/preview/away/disturbance |
+| Optional video preprocess (dull/dark detector assist; denoise optional) | Built; OFF by default; async; originals used for crops/preview/away/disturbance; quality_assist = blur-gate crop only |
 | README with architecture diagram, planning doc, compute estimates | Written; has placeholders (video link, sample output) |
 
 ## 3. Repository map
@@ -100,7 +100,7 @@ Old imports (`from src.database import Database`, etc.) still work via shims; ru
 - `events.log` must contain: TRACK_STARTED/ENDED (paired), EMBEDDING_GENERATED, FACE_REGISTERED (`face_id`,`unique_total`,`track`), FACE_RECOGNIZED, ENTRY (`entry_kind=new|re_entry`) plus companion NEW_ENTRY / RE_ENTRY, EXIT, COUNT_SNAPSHOT; STREAM_END carries `new_faces`/`unique_so_far`. AWAY_* live in `away_events.log`. Unique counting still keys off ENTRY/EXIT + `faces` rows — NEW_ENTRY/RE_ENTRY are audit labels only.
 - Heavy imports (ultralytics, insightface) stay inside `main.py`/detector/recognizer so tests run without models (dependency injection into the pipeline).
 - DB writes stay commit-per-write (resilience to interruption).
-- **Optional preprocess (OFF by default):** enhanced frames may feed **only** the face detector (and optional blur-gate `quality_assist`). Embeddings, crops, annotated/live preview, away/person inputs, and disturbance/brightness-jump stats always use the **original** frame. When disabled, the detector path is a no-op (byte-identical to pre-feature). The API remains read-only except `PUT/POST /api/preprocess*`, which may write only `data/runtime/preprocess.json` (never the DB).
+- **Optional preprocess (OFF by default):** async worker downscales to detector size, auto-gates on brightness/contrast (dull/dark only), then frame filters. Detector input = enhanced if ready, else original (no wait on live). Boxes map back to original → tracker → crops from original. `quality_assist` is **not** a frame filter — only contrast on the 112×112 blur-gate crop from the original. Embeddings / live / away / disturbance always use the original. When disabled, detector path is a no-op. API write path: `PUT/POST /api/preprocess*` → `data/runtime/preprocess.json` only (never the DB).
 
 ## 5. Config (`config.json`) — keys and meaning
 `video_source` / `video_sources[]`; `detection_skip_frames` (N = skip N frames between YOLO runs);

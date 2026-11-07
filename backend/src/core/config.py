@@ -110,7 +110,7 @@ DEFAULTS = {
         "live_max_width": 960,
         "live_every_n_frames": 2,
     },
-    # Optional dull/dark/noisy assist for the face detector only (OFF by default).
+    # Optional dull/dark assist for the face detector only (OFF by default).
     "preprocess": {
         "enabled": False,
         "process_at_detector_resolution": True,

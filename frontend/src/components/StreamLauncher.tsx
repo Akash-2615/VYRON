@@ -73,47 +73,49 @@ export default function StreamLauncher({ paused }: { paused: boolean }) {
     try { localStorage.setItem("vyron.localVideo", localPath); } catch { /* ignore */ }
   }, [localPath]);
 
-  const running = Boolean(job?.running || job?.starting);
+  const running = Boolean(job?.running || job?.starting || job?.thread_alive);
   const available = videos.filter((v) => v.exists);
+
+  async function startOnce() {
+    if (mode === "rtsp") {
+      const trimmed = url.trim();
+      if (!trimmed) throw new Error("Paste an RTSP link first (rtsp://…)");
+      localStorage.setItem("facetrack.rtsp", trimmed);
+      return api.trackerStart(trimmed, false, "rtsp", { reset: clearDb });
+    }
+    if (mode === "webcam") {
+      const id = (webcamId || "0").trim();
+      localStorage.setItem("vyron.webcam", id);
+      return api.trackerStart(id, false, "webcam", { reset: clearDb });
+    }
+    if (playlist === "all") {
+      if (!available.length) {
+        throw new Error("No local videos found — add files under data/videos/ or data/");
+      }
+      return api.trackerStart("", false, "local", { playlist: "all", reset: clearDb });
+    }
+    const path = localPath.trim();
+    if (!path) throw new Error("Select a local video first");
+    localStorage.setItem("vyron.localVideo", path);
+    return api.trackerStart(path, false, "local", { playlist: "one", reset: clearDb });
+  }
 
   async function onStart() {
     setErr(null);
     setBusy(true);
     try {
-      if (mode === "rtsp") {
-        const trimmed = url.trim();
-        if (!trimmed) {
-          setErr("Paste an RTSP link first (rtsp://…)");
+      try {
+        setJob(await startOnce());
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        // Hung worker left Start blocked — stop/reclaim then retry once (keeps clear checkbox).
+        if (/already running/i.test(msg)) {
+          try { await api.trackerStop(); } catch { /* ignore */ }
+          setJob(await startOnce());
           return;
         }
-        localStorage.setItem("facetrack.rtsp", trimmed);
-        setJob(await api.trackerStart(trimmed, false, "rtsp", { reset: clearDb }));
-        return;
+        throw e;
       }
-
-      if (mode === "webcam") {
-        const id = (webcamId || "0").trim();
-        localStorage.setItem("vyron.webcam", id);
-        setJob(await api.trackerStart(id, false, "webcam", { reset: clearDb }));
-        return;
-      }
-
-      if (playlist === "all") {
-        if (!available.length) {
-          setErr("No local videos found — add files under data/videos/ or data/");
-          return;
-        }
-        setJob(await api.trackerStart("", false, "local", { playlist: "all", reset: clearDb }));
-        return;
-      }
-
-      const path = localPath.trim();
-      if (!path) {
-        setErr("Select a local video first");
-        return;
-      }
-      localStorage.setItem("vyron.localVideo", path);
-      setJob(await api.trackerStart(path, false, "local", { playlist: "one", reset: clearDb }));
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -319,6 +321,11 @@ export default function StreamLauncher({ paused }: { paused: boolean }) {
         />
         Clear registered faces on Start
       </label>
+      {clearDb && (
+        <p className="muted small" style={{ margin: "4px 0 0" }}>
+          Next Start wipes the face gallery + session log, then opens a fresh stream.
+        </p>
+      )}
 
       <p className="muted small rtsp-hint">{modeHint}</p>
       {err && <p className="rtsp-error">{err}</p>}

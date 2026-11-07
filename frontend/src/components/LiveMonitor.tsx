@@ -11,6 +11,8 @@ export default function LiveMonitor({ paused, compact = false, fullscreen = fals
   const [job, setJob] = useState<TrackerJobStatus | null>(null);
   const [tick, setTick] = useState(0);
   const [freezeKey, setFreezeKey] = useState(0);
+  const [ppOn, setPpOn] = useState(false);
+  const [ppSrc, setPpSrc] = useState<string | null>(null);
 
   useEffect(() => {
     if (paused) return;
@@ -22,11 +24,35 @@ export default function LiveMonitor({ paused, compact = false, fullscreen = fals
       api.trackerStatus()
         .then((s) => { if (!cancelled) setJob(s); })
         .catch(() => { /* ignore */ });
+      api.preprocess()
+        .then((p) => {
+          if (cancelled) return;
+          setPpOn(Boolean(p.enabled ?? p.settings?.enabled));
+        })
+        .catch(() => { if (!cancelled) setPpOn(false); });
     };
     pull();
     const id = window.setInterval(pull, 800);
     return () => { cancelled = true; window.clearInterval(id); };
   }, [paused]);
+
+  // Swap compare only after next JPEG loads — avoids remount flicker.
+  useEffect(() => {
+    if (paused || !ppOn || compact) {
+      setPpSrc(null);
+      return;
+    }
+    let cancelled = false;
+    const pull = () => {
+      const url = api.preprocessPreviewUrl();
+      const img = new Image();
+      img.onload = () => { if (!cancelled) setPpSrc(url); };
+      img.src = url;
+    };
+    pull();
+    const id = window.setInterval(pull, 1600);
+    return () => { cancelled = true; window.clearInterval(id); };
+  }, [paused, ppOn, compact]);
 
   useEffect(() => {
     if (!paused && status?.active) setTick((t) => t + 1);
@@ -116,12 +142,28 @@ export default function LiveMonitor({ paused, compact = false, fullscreen = fals
                   {status.no_face_in_frame ?? 0} no-face
                   {" · "}
                   {status.persons_in_frame ?? 0} person{(status.persons_in_frame ?? 0) === 1 ? "" : "s"}
+                  {ppOn ? " · preprocess on (see compare below)" : ""}
                 </>
               ) : (
                 <>Waiting for frames…</>
               )}
             </div>
           </div>
+          {ppOn && !compact && (
+            <div className="live-pp-compare" aria-label="Preprocess before and after">
+              <div className="live-pp-compare-head">
+                <strong>Original / Enhanced</strong>
+                <span className="muted small">
+                  Live feed above stays original. Right pane is Enhanced (detector input when ready).
+                </span>
+              </div>
+              {ppSrc ? (
+                <img src={ppSrc} alt="Preprocess before and after comparison" />
+              ) : (
+                <p className="muted small">Waiting for before/after preview…</p>
+              )}
+            </div>
+          )}
         </div>
       ) : (
         <Empty

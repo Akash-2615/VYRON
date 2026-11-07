@@ -1,4 +1,5 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Info } from "lucide-react";
 import { Card } from "../../components/ui";
 import { api } from "../../api";
 import { usePreprocess } from "./usePreprocess";
@@ -10,6 +11,9 @@ const PRESET_LABELS: Record<string, string> = {
   noisy_cctv: "Noisy CCTV",
 };
 
+const DETECTOR_RES_HELP =
+  "Downscale to the detector input size first, then enhance that smaller image. Live Monitor stays on the original. Preview panes: Original | Enhanced.";
+
 function stepEnabled(settings: Record<string, unknown> | undefined, name: string): boolean {
   if (!settings) return false;
   if (name === "quality_assist") {
@@ -19,10 +23,17 @@ function stepEnabled(settings: Record<string, unknown> | undefined, name: string
   return Boolean(block?.enabled);
 }
 
+function isFrameCatalogStep(step: { name: string; kind?: string }): boolean {
+  if (step.kind) return step.kind === "gate" || step.kind === "frame";
+  return step.name !== "quality_assist";
+}
+
 export function PreprocessCard({ paused = false }: { paused?: boolean }) {
   const { data, error, saving, savedAt, save, saveDebounced, reset } = usePreprocess(paused);
-  const [previewBust, setPreviewBust] = useState(0);
+  const [previewSrc, setPreviewSrc] = useState<string | null>(null);
+  const [helpOpen, setHelpOpen] = useState(false);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const helpRef = useRef<HTMLDivElement | null>(null);
   const settings = data?.settings;
   const metrics = data?.metrics || {};
   const writable = data?.writable !== false;
@@ -34,14 +45,22 @@ export function PreprocessCard({ paused = false }: { paused?: boolean }) {
     return { label: "On · gate idle (video looks fine)", cls: "count-ok" };
   }, [masterOn, metrics.gate_active]);
 
+  const frameSteps = useMemo(
+    () => (data?.step_catalog || []).filter(isFrameCatalogStep),
+    [data?.step_catalog],
+  );
+  const blurAssist = useMemo(
+    () => (data?.step_catalog || []).find((s) => s.name === "quality_assist" || s.kind === "blur_gate"),
+    [data?.step_catalog],
+  );
+
   const anyStepOn = useMemo(() => {
     if (!settings) return false;
-    return (data?.step_catalog || []).some((s) => stepEnabled(settings as unknown as Record<string, unknown>, s.name));
-  }, [settings, data?.step_catalog]);
+    return frameSteps.some((s) => stepEnabled(settings as unknown as Record<string, unknown>, s.name));
+  }, [settings, frameSteps]);
 
   const setMaster = (on: boolean) => {
     void save({ enabled: on });
-    setPreviewBust((n) => n + 1);
   };
 
   const setStepEnabled = (name: string, on: boolean) => {
@@ -60,12 +79,45 @@ export function PreprocessCard({ paused = false }: { paused?: boolean }) {
 
   const applyPreset = (name: string) => {
     void save({ preset: name });
-    setPreviewBust((n) => n + 1);
   };
 
   const toggleExpand = (name: string) => {
     setExpanded((prev) => ({ ...prev, [name]: !prev[name] }));
   };
+
+  // Swap preview only after the next JPEG loads — avoids remount flicker.
+  useEffect(() => {
+    if (!masterOn || paused) {
+      setPreviewSrc(null);
+      return;
+    }
+    let cancelled = false;
+    const pull = () => {
+      const url = api.preprocessPreviewUrl();
+      const img = new Image();
+      img.onload = () => { if (!cancelled) setPreviewSrc(url); };
+      img.src = url;
+    };
+    pull();
+    const id = window.setInterval(pull, 1600);
+    return () => { cancelled = true; window.clearInterval(id); };
+  }, [masterOn, paused]);
+
+  useEffect(() => {
+    if (!helpOpen) return;
+    const onDoc = (e: MouseEvent) => {
+      if (helpRef.current && !helpRef.current.contains(e.target as Node)) setHelpOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setHelpOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [helpOpen]);
 
   return (
     <Card title="Video preprocessing">
@@ -140,14 +192,13 @@ export function PreprocessCard({ paused = false }: { paused?: boolean }) {
             </div>
           </div>
 
-          {/* Steps + preview */}
+          {/* Frame filters + blur-gate assist (separate) */}
           <div className={`preprocess-main ${masterOn ? "" : "is-off"}`}>
             <ol className="preprocess-steps">
-              {(data.step_catalog || []).map((step, idx) => {
+              {frameSteps.map((step, idx) => {
                 const on = stepEnabled(settings as unknown as Record<string, unknown>, step.name);
                 const block = (settings as unknown as Record<string, Record<string, unknown>>)?.[step.name] || {};
                 const stepMs = (metrics.step_ms as Record<string, number> | undefined)?.[step.name];
-                // Keep collapsed by default so all 7 steps stay on-screen; expand on click / enable.
                 const open = expanded[step.name] === true;
                 return (
                   <li
@@ -222,32 +273,73 @@ export function PreprocessCard({ paused = false }: { paused?: boolean }) {
             </ol>
 
             <aside className="preprocess-aside">
-              <label className="small preprocess-advanced">
-                <input
-                  type="checkbox"
-                  checked={Boolean(settings?.process_at_detector_resolution)}
-                  disabled={!writable || !masterOn}
-                  aria-label="Process at detector resolution"
-                  onChange={(e) => void save({ process_at_detector_resolution: e.target.checked })}
-                />
-                Process at detector resolution
-              </label>
-
-              <div className="preprocess-preview">
-                <p className="muted small" style={{ marginBottom: 6 }}>Before / after</p>
-                {masterOn ? (
-                  <img
-                    key={previewBust}
-                    src={`${api.preprocessPreviewUrl()}&b=${previewBust}`}
-                    alt="Preprocess before and after"
-                    onError={(e) => { (e.target as HTMLImageElement).style.opacity = "0.35"; }}
-                    onLoad={(e) => { (e.target as HTMLImageElement).style.opacity = "1"; }}
+              <div className="preprocess-advanced-row" ref={helpRef}>
+                <label className="small preprocess-advanced">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(settings?.process_at_detector_resolution)}
+                    disabled={!writable || !masterOn}
+                    aria-label="Process at detector resolution"
+                    onChange={(e) => void save({ process_at_detector_resolution: e.target.checked })}
                   />
-                ) : (
-                  <p className="muted small">Turn preprocessing on to see a live preview.</p>
+                  Process at detector resolution
+                </label>
+                <button
+                  type="button"
+                  className="preprocess-info-btn"
+                  aria-label="About process at detector resolution"
+                  aria-expanded={helpOpen}
+                  title="About this option"
+                  onClick={() => setHelpOpen((v) => !v)}
+                >
+                  <Info size={14} />
+                </button>
+                {helpOpen && (
+                  <div className="preprocess-info-pop" role="tooltip">
+                    {DETECTOR_RES_HELP}
+                  </div>
                 )}
               </div>
+              {blurAssist && (
+                <div className="preprocess-blur-assist">
+                  <label className="small preprocess-advanced">
+                    <input
+                      type="checkbox"
+                      checked={stepEnabled(settings as unknown as Record<string, unknown>, "quality_assist")}
+                      disabled={!writable || !masterOn}
+                      aria-label="Quality-gate assist"
+                      onChange={(e) => setStepEnabled("quality_assist", e.target.checked)}
+                    />
+                    {blurAssist.label}
+                  </label>
+                  <p className="muted small" style={{ margin: 0 }}>
+                    Blur-gate branch only — contrast on the 112×112 crop from the <b>original</b> frame. Not a detector frame filter.
+                  </p>
+                </div>
+              )}
             </aside>
+          </div>
+
+          <div className="preprocess-preview-hero">
+            <div className="preprocess-preview-hero-head">
+              <h4>Original / Enhanced</h4>
+              <span className="muted small">
+                Left = Original (identity · live · crops) · Right = Enhanced (detector when ready)
+              </span>
+            </div>
+            {masterOn ? (
+              previewSrc ? (
+                <img
+                  className="preprocess-preview-hero-img"
+                  src={previewSrc}
+                  alt="Preprocess before and after"
+                />
+              ) : (
+                <p className="muted small">Waiting for first before/after frame…</p>
+              )
+            ) : (
+              <p className="muted small">Turn preprocessing on to see a live before/after comparison.</p>
+            )}
           </div>
         </div>
       )}

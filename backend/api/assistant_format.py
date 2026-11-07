@@ -151,7 +151,7 @@ METRIC_GLOSSARY = {
     },
     "preprocessing": {
         "name": "video preprocessing",
-        "plain": "Optional dull/dark/noisy assist for the face detector only. Crops, preview, and disturbance stats always use the original frame.",
+        "plain": "Optional dull/dark assist for the face detector only (enhanced if ready, else original). Crops, preview, and disturbance stats always use the original frame.",
     },
 }
 

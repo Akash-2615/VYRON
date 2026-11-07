@@ -195,7 +195,7 @@ Presence grace must satisfy `stationary_grace >= exit_grace >= edge_exit_grace` 
 **Live overlay:** yellow/cyan body + white face box with `…` = face tracked but not yet ID’d; green `ID N` = registered/recognized. Backs-of-heads and faces too small/blurry for InsightFace stay as `…` by design.
 
 ### Optional video preprocessing (OFF by default)
-Dashboard **Configuration → Video preprocessing**. Improves dull/dark/noisy footage for the **face detector only** (and optional blur-gate assist). Embeddings, entry/exit crops, live preview, away detection, and disturbance stats always use the **original** frame. Runs in a background worker (async) so the tracking loop does not wait on live sources.
+Dashboard **Configuration → Video preprocessing**. Improves dull/dark footage for the **face detector only** (optional denoise for grain; optional blur-gate assist on the 112×112 crop). Embeddings, entry/exit crops, live preview, away detection, and disturbance stats always use the **original** frame. Async worker downscales first; detector takes **enhanced if ready, else original** (no lag).
 
 | Step | What | Why |
 |---|---|---|

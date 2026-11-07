@@ -149,9 +149,47 @@ class TrackerJob:
         with self._lock:
             alive = self._thread is not None and self._thread.is_alive()
             out = dict(self._state)
-            out["running"] = bool(out.get("running") and alive)
             out["thread_alive"] = alive
+            if not alive:
+                # Reclaim finished worker so Start is not blocked by a dead Thread object.
+                self._thread = None
+                out["running"] = False
+                out["starting"] = False
+            else:
+                # Thread still alive (active or stuck after Stop) — UI must show Stop.
+                out["running"] = bool(out.get("running") or not out.get("starting"))
+                out["starting"] = bool(out.get("starting"))
+                if not out["running"] and not out["starting"]:
+                    out["running"] = True
             return out
+
+    def _reclaim_worker(self, wait_sec: float = 2.0) -> bool:
+        """Signal stop and drop a hung worker reference if it will not exit.
+
+        Returns True when no live worker remains (safe to start).
+        """
+        with self._lock:
+            t = self._thread
+            if t is None or not t.is_alive():
+                self._thread = None
+                self._state["running"] = False
+                self._state["starting"] = False
+                return True
+            self._stop["flag"] = True
+        t.join(timeout=wait_sec)
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                # Webcam/OpenCV can block forever on release; abandon so Start + clear work.
+                log.warning("tracker worker did not exit after stop; reclaiming slot")
+                self._thread = None
+                self._state["running"] = False
+                self._state["starting"] = False
+                self._state["error"] = "Previous tracker was force-stopped (hung worker)."
+                return True
+            self._thread = None
+            self._state["running"] = False
+            self._state["starting"] = False
+            return True
 
     def start(
         self,
@@ -197,6 +235,16 @@ class TrackerJob:
             raise ValueError("mode must be 'rtsp', 'local', or 'webcam'")
 
         with self._lock:
+            alive = self._thread is not None and self._thread.is_alive()
+            active = alive and bool(self._state.get("running") or self._state.get("starting"))
+        if active:
+            raise RuntimeError(
+                "Tracker already running. Stop it before starting a new stream.")
+        if alive:
+            # Stale worker (Stop timed out / finally cleared flags) — reclaim then start.
+            self._reclaim_worker(wait_sec=2.0)
+
+        with self._lock:
             if self._thread and self._thread.is_alive():
                 raise RuntimeError(
                     "Tracker already running. Stop it before starting a new stream.")
@@ -226,14 +274,7 @@ class TrackerJob:
         return self.status()
 
     def stop(self) -> Dict[str, Any]:
-        with self._lock:
-            self._stop["flag"] = True
-        t = self._thread
-        if t and t.is_alive():
-            t.join(timeout=8)
-        with self._lock:
-            self._state["running"] = False
-            self._state["starting"] = False
+        self._reclaim_worker(wait_sec=8.0)
         return self.status()
 
     def _run(

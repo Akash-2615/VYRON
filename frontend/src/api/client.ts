@@ -164,6 +164,7 @@ export interface PreprocessParamSpec {
 
 export interface PreprocessStepCatalog {
   name: string;
+  kind?: "gate" | "frame" | "blur_gate" | string;
   label: string;
   what: string;
   why: string;
