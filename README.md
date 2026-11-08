@@ -39,9 +39,9 @@ Python imports use `src.*` / `api.*` with `pythonpath=backend`. Paths resolve fr
 
 ## 1. Setup instructions
 
-> **Use the committed [`config.json`](config.json) as-is.**  
-> It is the **recommended production profile** for VYRON — tuned on our hardware and sample/crowd footage for **cleaner detections**, **correct re-identification**, and **far fewer false “new visitor” splits** (same face wrongly registered again).  
-> Changing match / anti-split / tracker values without measuring usually makes accuracy **worse**. Prefer this file first; only retune after a clean `make count` baseline.
+> **Use the committed [`config.json`](config.json) as-is** (tuned for our system).  
+> VYRON uses a **2-step detect → embed/identify** pipeline (see §3). That design **reduces** false new IDs and bad matches — it does **not** claim zero mistakes. Crowds, blur, and profile faces can still mis-identify sometimes.  
+> Prefer this file first; only retune after a clean `make count` baseline.
 
 ### Requirements
 - Python **3.9–3.11**, Node.js 18+ (dashboard)
@@ -123,7 +123,7 @@ python3 main.py --source rtsp://user:pass@host:554/stream --display
 6. Event timestamps use **wall-clock processing time**; monotonic time is only for grace durations.
 7. Optional **preprocess** may enhance frames for the **face detector only**. Crops, embeddings, Live Monitor, away detection, and disturbance stats always use the **original** frame (identity must not drift).
 8. Runtime storage is **PostgreSQL** via `DATABASE_URL`. SQLite is for unit tests only.
-9. The committed **`config.json` is our proven accuracy profile** (see §3) — not a random default. Use it before retuning.
+9. Identity is **2-step** (detect, then embed/match) — still not perfect in hard footage; see §3.
 10. Dashboard **Start** keeps the gallery by default; tick **Clear registered faces on Start** (or use `--fresh`) when you want a wipe.
 
 ---
@@ -132,20 +132,31 @@ python3 main.py --source rtsp://user:pass@host:554/stream --display
 
 **Full file:** [`config.json`](config.json) at the repo root — **do not replace with older excerpts**.
 
-### Why these settings (highly recommended)
+### 2-step detection + embedding (how identity works)
+
+VYRON does **not** register a visitor from a single YOLO box. Identity is always **two steps**:
+
+| Step | What runs | Role |
+|---|---|---|
+| **1. Detection** | YOLOv8-face (+ optional Retina assist) → ByteTrack | Find / follow faces in the frame (boxes only — **no** gallery ID yet). |
+| **2. Embedding & match** | Quality gate → InsightFace ArcFace crop embed → `match_with_gap` | Compare to the gallery. Hard match ≥ `match_threshold` → same `face_id`. Soft margin / `anti_split_threshold` + **`min_embeds_to_register: 2`** block a hasty new unique when the face is already known or the crop is weak. |
+
+So: **detect first, identify second.** That cut down twin IDs and junk registers on our hardware — but **wrong IDs / occasional new splits can still happen** (angle, occlusion, lookalikes, heavy crowd). Tune carefully; do not expect “zero false detection.”
+
+### Why these settings (highly recommended on your machine)
 
 | Goal | How this config helps |
 |---|---|
-| **Cleaner detection** | Face YOLO `conf_threshold` **0.12**, `imgsz` **768**, `detection_skip_frames` **0**, `process_max_width` **1280** — strong recall without downscaling away small faces. |
-| **Correct identification** | ArcFace `match_threshold` **0.52** + `min_match_gap` / `soft_match_margin` — same person rematches; strangers stay apart. |
-| **No same face as a new unique** | `anti_split_threshold` **0.48**, `min_embeds_to_register` **2**, quality gate, shared gallery across file/webcam/RTSP — stops twin IDs / false `FACE_REGISTERED`. |
-| **Stable visits** | Presence grace + ByteTrack `low_conf` recovery — fewer dropouts that look like a “new” person. |
-| **Honest away people** | `away_walkers` on — no-face walkers do **not** inflate `faces` unique count. |
+| **Stronger step-1 detect** | `conf_threshold` **0.12**, `imgsz` **768**, `detection_skip_frames` **0**, `process_max_width` **1280**. |
+| **Safer step-2 identify** | `match_threshold` **0.52**, `soft_match_margin` / `min_match_gap`, `anti_split_threshold` **0.48**, **2 embeds before register**. |
+| **Fewer twin uniques** | Shared gallery across file/webcam/RTSP + anti-split before `FACE_REGISTERED`. |
+| **Stable tracks** | ByteTrack high+low association + presence grace (still not perfect). |
+| **Away ≠ unique face** | `away_walkers` on — no-face people stay out of `faces` count. |
 
-On our runs (sample + crowd clips + Live Monitor), moving to this profile produced **more accurate unique counts**, **entries ≈ exits**, and **fewer false new registrations** for people already in the gallery. Demo video: https://youtu.be/1fPQ02_u_wc · sample screenshots in §6.
+With this profile (vs older looser settings) our runs got **cleaner counts and fewer false new registrations** — not perfect identity. Demo: https://youtu.be/1fPQ02_u_wc · screenshots §6.
 
 > **Please use this `config.json` on your system.**  
-> Copy the repo file as-is. If you must change one knob later: too many new IDs → lower match slightly or keep anti-split; wrong merges → raise `match_threshold` / `min_match_gap`. Always re-check with `make count`.
+> Keep the 2-step thresholds above. If you retune: too many new IDs → keep/raise anti-split or require more embeds; wrong merges → raise `match_threshold` / `min_match_gap`. Always re-check with `make count`.
 
 ### Key values (committed now)
 
