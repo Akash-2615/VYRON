@@ -39,51 +39,62 @@ Python imports use `src.*` / `api.*` with `pythonpath=backend`. Paths resolve fr
 
 ## 1. Setup instructions
 
+> **Use the committed [`config.json`](config.json) as-is.**  
+> It is the **recommended production profile** for VYRON — tuned on our hardware and sample/crowd footage for **cleaner detections**, **correct re-identification**, and **far fewer false “new visitor” splits** (same face wrongly registered again).  
+> Changing match / anti-split / tracker values without measuring usually makes accuracy **worse**. Prefer this file first; only retune after a clean `make count` baseline.
+
 ### Requirements
-- Python **3.9–3.11**, Node.js 18+ (for the dashboard)
+- Python **3.9–3.11**, Node.js 18+ (dashboard)
 - Docker (local Postgres)
 - macOS / Linux / Windows (Windows may need *Microsoft C++ Build Tools* for InsightFace)
+- Camera permission if using **Webcam** (grant to Terminal / Python)
 
-### Install and run (CLI)
+### Install (one-time)
 ```bash
-# 1) Clone and enter the repo
+# 1) Clone
 git clone https://github.com/Akash-2615/VYRON.git
 cd VYRON
 
-# 2) Python env + dependencies
+# 2) Python env + deps
 python3 -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 make install                       # backend pip + frontend npm
 
-# 3) Local Postgres + env
+# 3) Postgres + env  (required — no SQLite fallback at runtime)
 make db                            # docker compose -f deploy/docker-compose.yml up -d db
 cp .env.example .env
-# .env must contain:
+# Edit .env:
 #   DATABASE_URL=postgresql://facetrack:facetrack@localhost:5432/facetrack
-# Optional for ARIA:
+# Optional ARIA:
 #   GROQ_API_KEY=...
 
-# 4) Run on the sample / configured video
-make run                           # python3 main.py  (reads config.json)
-# Clean gallery + archived logs:
-make fresh                         # python3 main.py --fresh
+# 4) Keep root config.json unchanged (recommended profile — see §3)
 ```
 
-### Dashboard (Live Monitor / RTSP / webcam)
+### Run — CLI
 ```bash
-make build-web && make api
-# open http://127.0.0.1:8000
-# Live Monitor → choose RTSP / Local video / Webcam → Start
+make run                           # uses config.json video_source
+make fresh                         # wipe gallery + archive logs, then run
+```
 
-# Dev UI (hot reload):
+### Run — Dashboard (recommended for demos)
+```bash
+# Production-style (API serves built UI):
+make build-web && make api
+# → http://127.0.0.1:8000
+
+# Or hot-reload UI:
 #   Terminal 1: make api
 #   Terminal 2: make web   → http://127.0.0.1:5173
+
+# Live Monitor → Local video / Webcam / RTSP → Start
+# Leave “Clear registered faces” unchecked to keep one shared gallery across sources.
 ```
 
 ### Useful commands
 ```bash
 make test                          # pytest -q (no GPU/models required)
-make count                         # reconcile DB ↔ events.log
+make count                         # reconcile DB ↔ events.log  (expect Consistent)
 make check                         # final hygiene checks
 make rtsp                          # paste RTSP URL runner
 python3 main.py --sources data/videos/v1.mp4 data/videos/v2.mp4
@@ -91,13 +102,13 @@ python3 main.py --source rtsp://user:pass@host:554/stream --display
 ```
 
 ### First-run models
-- YOLO face weights auto-download to `data/models/yolov8n-face.pt`
-- InsightFace `buffalo_l` auto-downloads under `~/.insightface`
+- YOLO face weights → `data/models/yolov8n-face.pt` (auto-download)
+- InsightFace `buffalo_l` → `~/.insightface` (auto-download)
 
 ### Notes
 - Postgres DSN lives **only** in `.env` (`DATABASE_URL`) — never in `config.json`
-- Missing/unreachable DB → startup fails (no SQLite fallback in runtime)
-- Crops and `events.log` stay under `logs/`
+- Missing/unreachable DB → startup fails
+- Crops + `events.log` under `logs/`
 - Never commit `.env`, `.venv/`, or a real DSN
 
 ---
@@ -112,48 +123,73 @@ python3 main.py --source rtsp://user:pass@host:554/stream --display
 6. Event timestamps use **wall-clock processing time**; monotonic time is only for grace durations.
 7. Optional **preprocess** may enhance frames for the **face detector only**. Crops, embeddings, Live Monitor, away detection, and disturbance stats always use the **original** frame (identity must not drift).
 8. Runtime storage is **PostgreSQL** via `DATABASE_URL`. SQLite is for unit tests only.
-9. `match_threshold` (default **0.52** in committed config) is a starting point for `buffalo_l` and should be tuned on your footage.
+9. The committed **`config.json` is our proven accuracy profile** (see §3) — not a random default. Use it before retuning.
 10. Dashboard **Start** keeps the gallery by default; tick **Clear registered faces on Start** (or use `--fresh`) when you want a wipe.
 
 ---
 
-## 3. Sample `config.json` structure
+## 3. Recommended `config.json` (system-tuned · please use this)
 
-Full file: [`config.json`](config.json) at the repo root. Excerpt of the committed structure:
+**Full file:** [`config.json`](config.json) at the repo root — **do not replace with older excerpts**.
+
+### Why these settings (highly recommended)
+
+| Goal | How this config helps |
+|---|---|
+| **Cleaner detection** | Face YOLO `conf_threshold` **0.12**, `imgsz` **768**, `detection_skip_frames` **0**, `process_max_width` **1280** — strong recall without downscaling away small faces. |
+| **Correct identification** | ArcFace `match_threshold` **0.52** + `min_match_gap` / `soft_match_margin` — same person rematches; strangers stay apart. |
+| **No same face as a new unique** | `anti_split_threshold` **0.48**, `min_embeds_to_register` **2**, quality gate, shared gallery across file/webcam/RTSP — stops twin IDs / false `FACE_REGISTERED`. |
+| **Stable visits** | Presence grace + ByteTrack `low_conf` recovery — fewer dropouts that look like a “new” person. |
+| **Honest away people** | `away_walkers` on — no-face walkers do **not** inflate `faces` unique count. |
+
+On our runs (sample + crowd clips + Live Monitor), moving to this profile produced **more accurate unique counts**, **entries ≈ exits**, and **fewer false new registrations** for people already in the gallery. Demo video: https://youtu.be/1fPQ02_u_wc · sample screenshots in §6.
+
+> **Please use this `config.json` on your system.**  
+> Copy the repo file as-is. If you must change one knob later: too many new IDs → lower match slightly or keep anti-split; wrong merges → raise `match_threshold` / `min_match_gap`. Always re-check with `make count`.
+
+### Key values (committed now)
 
 ```json
 {
   "video_source": "data/videos/video_sample1.mp4",
-  "video_sources": [],
-  "detection_skip_frames": 3,
+  "detection_skip_frames": 0,
 
   "detector": {
     "weights": "data/models/yolov8n-face.pt",
-    "conf_threshold": 0.28,
-    "imgsz": 512,
+    "conf_threshold": 0.12,
+    "imgsz": 768,
     "device": "auto"
   },
 
   "recognition": {
     "model_pack": "buffalo_l",
     "match_threshold": 0.52,
+    "soft_match_margin": 0.06,
+    "min_match_gap": 0.04,
+    "anti_split_threshold": 0.48,
+    "register_min_det_score": 0.38,
     "min_embeds_to_register": 2,
     "max_embeddings_per_face": 5,
-    "embed_retry_interval": 2,
-    "max_embed_attempts": 12
+    "embed_retry_interval": 1,
+    "max_embed_attempts": 16,
+    "max_identify_per_frame": 12
   },
 
   "quality": {
-    "min_face_px": 12,
-    "min_blur_var": 8.0
+    "min_face_px": 10,
+    "min_blur_var": 6.0
   },
 
   "tracker": {
-    "high_conf": 0.32,
-    "new_track_conf": 0.28,
-    "iou_threshold": 0.28,
-    "min_hits": 2,
-    "max_lost_frames": 36
+    "high_conf": 0.30,
+    "new_track_conf": 0.30,
+    "low_conf": 0.12,
+    "iou_threshold": 0.22,
+    "low_iou_threshold": 0.18,
+    "min_hits": 1,
+    "max_lost_frames": 50,
+    "reentry_grace_frames": 90,
+    "reentry_grace_sec": 30.0
   },
 
   "presence": {
@@ -161,44 +197,36 @@ Full file: [`config.json`](config.json) at the repo root. Excerpt of the committ
     "edge_exit_grace_seconds": 2,
     "stationary_grace_seconds": 45,
     "occlusion_grace_multiplier": 2.0,
-    "edge_margin_px": 24,
-    "stationary_speed_px_s": 15,
     "max_stream_gap_seconds": 20
   },
 
   "away_walkers": { "enabled": true },
-  "appearance": { "enabled": true },
+  "appearance": { "enabled": true, "describe_on_register": true },
+
+  "stream": {
+    "realtime": true,
+    "catch_up_drop": true,
+    "process_max_width": 1280
+  },
+
+  "output": {
+    "live_preview": "data/runtime/live.jpg",
+    "live_max_width": 960,
+    "live_every_n_frames": 2
+  },
 
   "storage": {
     "backend": "postgres",
-    "postgres": {},
-    "log_dir": "logs",
     "events_log": "logs/events.log",
     "reset_on_start": false
   },
 
-  "stream": {
-    "reconnect_delay_sec": 3,
-    "realtime": true,
-    "catch_up_drop": true,
-    "process_max_width": 960
-  },
-
-  "output": {
-    "display": false,
-    "live_preview": "data/runtime/live.jpg"
-  },
-
-  "preprocess": {
-    "enabled": false,
-    "process_at_detector_resolution": true,
-    "mode": "async"
-  }
+  "preprocess": { "enabled": false }
 }
 ```
 
-- `detection_skip_frames = N` → run YOLO on one frame, skip the next N.
-- Postgres DSN is **not** here — set `DATABASE_URL` in `.env` only.
+- `detection_skip_frames = 0` → detect every frame (best accuracy; raise only if CPU-bound).
+- Postgres DSN is **not** in this file — set `DATABASE_URL` in `.env` only.
 
 ---
 
