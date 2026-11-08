@@ -270,7 +270,7 @@ flowchart LR
 
 ## 5. Loom / YouTube demo video
 
-**Video link:** `<ADD YOUR LOOM OR YOUTUBE LINK HERE>`
+**Video link:** https://youtu.be/1fPQ02_u_wc
 
 > **Required by evaluators.** If you do not submit an explanatory video, your submission will not be reviewed.
 
