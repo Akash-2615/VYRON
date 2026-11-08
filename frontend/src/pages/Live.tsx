@@ -1,11 +1,13 @@
 import { Check, LogIn, LogOut, UserCheck, Users } from "lucide-react";
 import { api, Summary } from "../api";
 import KpiCard from "../components/KpiCard";
+import LiveEventsFeed from "../components/LiveEventsFeed";
 import LiveMonitor from "../components/LiveMonitor";
 import { usePolling } from "../api";
 
-export default function Live({ summary, paused }: {
+export default function Live({ summary, paused, onSelectVisitor }: {
   summary: Summary | null; paused: boolean;
+  onSelectVisitor?: (id: number) => void;
 }) {
   const live = usePolling(api.liveStatus, [], 800, paused);
   const tracker = usePolling(api.trackerStatus, [], 1500, paused);
@@ -51,6 +53,10 @@ export default function Live({ summary, paused }: {
 
       <div className="live-page-stage">
         <LiveMonitor paused={paused} fullscreen />
+      </div>
+
+      <div className="live-page-events">
+        <LiveEventsFeed paused={paused} onSelectVisitor={onSelectVisitor} limit={16} />
       </div>
     </div>
   );

@@ -1,25 +1,68 @@
 import { useMemo, useState } from "react";
 import { Search } from "lucide-react";
-import { api } from "../api";
+import { api, Visitor } from "../api";
 import { Badge, Card, Empty, Thumb } from "../components/ui";
 import { usePolling } from "../api";
 import { fmtDateTime, fmtDuration } from "../utils";
 
 type Filter = "all" | "inside" | "left" | "returning";
+type Sort =
+  | "last_seen_desc"
+  | "last_seen_asc"
+  | "first_seen_desc"
+  | "first_seen_asc"
+  | "id_desc"
+  | "id_asc"
+  | "visits_desc"
+  | "dwell_desc";
+
+function ts(value: string | null | undefined): number {
+  if (!value) return 0;
+  const n = Date.parse(value);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function dwell(v: Visitor): number {
+  return v.time_in_frame_seconds ?? v.total_dwell_seconds ?? 0;
+}
+
+function compareVisitors(a: Visitor, b: Visitor, sort: Sort): number {
+  switch (sort) {
+    case "last_seen_asc":
+      return ts(a.last_seen) - ts(b.last_seen) || a.face_id - b.face_id;
+    case "first_seen_desc":
+      return ts(b.first_seen) - ts(a.first_seen) || b.face_id - a.face_id;
+    case "first_seen_asc":
+      return ts(a.first_seen) - ts(b.first_seen) || a.face_id - b.face_id;
+    case "id_desc":
+      return b.face_id - a.face_id;
+    case "id_asc":
+      return a.face_id - b.face_id;
+    case "visits_desc":
+      return (b.visit_count - a.visit_count) || (ts(b.last_seen) - ts(a.last_seen));
+    case "dwell_desc":
+      return (dwell(b) - dwell(a)) || (ts(b.last_seen) - ts(a.last_seen));
+    case "last_seen_desc":
+    default:
+      return ts(b.last_seen) - ts(a.last_seen) || b.face_id - a.face_id;
+  }
+}
 
 export default function Visitors({ paused, onSelectVisitor }: { paused: boolean; onSelectVisitor: (id: number) => void }) {
   const { data, error, loading } = usePolling(api.visitors, [], 5000, paused);
   const [q, setQ] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
+  const [sort, setSort] = useState<Sort>("last_seen_desc");
 
   const rows = useMemo(() => {
-    return (data ?? []).filter((v) => {
+    const filtered = (data ?? []).filter((v) => {
       if (q && !String(v.face_id).includes(q.replace("#", ""))) return false;
       if (filter === "inside" || filter === "left") return v.status === filter;
       if (filter === "returning") return v.visit_count > 1;
       return true;
     });
-  }, [data, q, filter]);
+    return [...filtered].sort((a, b) => compareVisitors(a, b, sort));
+  }, [data, q, filter, sort]);
 
   return (
     <Card
@@ -27,11 +70,21 @@ export default function Visitors({ paused, onSelectVisitor }: { paused: boolean;
       action={
         <div className="toolbar">
           <label className="search"><Search size={15} /><input placeholder="Search by ID" value={q} onChange={(e) => setQ(e.target.value)} /></label>
-          <select value={filter} onChange={(e) => setFilter(e.target.value as Filter)}>
+          <select value={filter} onChange={(e) => setFilter(e.target.value as Filter)} aria-label="Filter visitors">
             <option value="all">All</option>
             <option value="inside">Inside now</option>
             <option value="left">Left</option>
             <option value="returning">Returning</option>
+          </select>
+          <select value={sort} onChange={(e) => setSort(e.target.value as Sort)} aria-label="Sort visitors">
+            <option value="last_seen_desc">Last seen · newest</option>
+            <option value="last_seen_asc">Last seen · oldest</option>
+            <option value="first_seen_desc">First seen · newest</option>
+            <option value="first_seen_asc">First seen · oldest</option>
+            <option value="id_desc">ID · high → low</option>
+            <option value="id_asc">ID · low → high</option>
+            <option value="visits_desc">Most visits</option>
+            <option value="dwell_desc">Longest in frame</option>
           </select>
         </div>
       }

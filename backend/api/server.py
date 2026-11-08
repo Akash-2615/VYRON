@@ -291,11 +291,14 @@ def create_app(db_path: Optional[str] = None, log_dir: str = "logs",
         if not live_path.is_file():
             return {**empty, "path": str(live_path)}
         age = time.time() - live_path.stat().st_mtime
-        out = {"active": age < 5.0, "path": str(live_path), "age_sec": round(age, 2),
+        # Full-res pipelines can take >5s/frame; keep the monitor alive via stats
+        # freshness too (stats write every processed frame, JPEG is async).
+        out = {"active": False, "path": str(live_path), "age_sec": round(age, 2),
                "bytes": live_path.stat().st_size,
                "persons_in_frame": None, "faces_in_frame": None, "no_face_in_frame": None,
-               "fps": None, "latency_ms": int(round(age * 1000)) if age < 5 else None,
+               "fps": None, "latency_ms": None,
                "width": None, "height": None}
+        stats_age = None
         stats_file = live_path.with_name("live_stats.json")
         if stats_file.is_file():
             try:
@@ -313,9 +316,15 @@ def create_app(db_path: Optional[str] = None, log_dir: str = "logs",
                 if st.get("latency_ms") is not None:
                     out["latency_ms"] = st.get("latency_ms")
                 if st.get("ts"):
-                    out["stats_age_sec"] = round(time.time() - float(st["ts"]), 2)
+                    stats_age = time.time() - float(st["ts"])
+                    out["stats_age_sec"] = round(stats_age, 2)
             except (OSError, ValueError, TypeError):
                 pass
+        jpg_fresh = age < 20.0
+        stats_fresh = stats_age is not None and stats_age < 15.0
+        out["active"] = bool(jpg_fresh or stats_fresh)
+        if out["latency_ms"] is None and jpg_fresh:
+            out["latency_ms"] = int(round(age * 1000))
         return out
 
     @app.get("/api/live.jpg")

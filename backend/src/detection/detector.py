@@ -109,12 +109,13 @@ class YoloFaceDetector:
         self.conf = float(cfg["conf_threshold"])
         self.imgsz = int(cfg["imgsz"])
         self.device = _resolve_device(cfg["device"])
-        self.half = self.device != "cpu"
+        # Ultralytics 8.4+: `half=` deprecated → `quantize=16` (FP16) / None (FP32).
+        self.quantize = 16 if self.device != "cpu" else None
         log.info("YOLO face detector ready (device=%s)", self.device)
 
     def detect(self, frame: np.ndarray) -> np.ndarray:
         res = self.model.predict(frame, imgsz=self.imgsz, conf=self.conf,
-                                 device=self.device, half=self.half, verbose=False)[0]
+                                 device=self.device, quantize=self.quantize, verbose=False)[0]
         if res.boxes is None or len(res.boxes) == 0:
             return np.zeros((0, 5), dtype=np.float32)
         xyxy = res.boxes.xyxy.cpu().numpy()

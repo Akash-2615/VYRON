@@ -1,18 +1,18 @@
 import { useState } from "react";
 import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from "recharts";
 import {
-  ArrowDownLeft, ArrowUpRight, BadgeCheck, Check, IdCard, LogIn, LogOut, Maximize2, UserCheck, Users,
+  BadgeCheck, Check, IdCard, LogIn, LogOut, Maximize2, UserCheck, Users,
 } from "lucide-react";
 import { api, Summary } from "../api";
 import ActivityChart from "../components/ActivityChart";
 import AiPipeline from "../components/AiPipeline";
 import ChartModal from "../components/ChartModal";
 import KpiCard from "../components/KpiCard";
+import LiveEventsFeed from "../components/LiveEventsFeed";
 import LiveMonitor from "../components/LiveMonitor";
-import { Card, Empty, Thumb } from "../components/ui";
+import { Card, Empty } from "../components/ui";
 import { useCssVar } from "../theme";
 import { usePolling } from "../api";
-import { entryKindLabel, fmtTime } from "../utils";
 
 type ExpandChart = "flow" | "status" | null;
 
@@ -22,7 +22,6 @@ export default function Overview({ summary, paused, onSelectVisitor, onOpenLive 
 }) {
   const [expanded, setExpanded] = useState<ExpandChart>(null);
   const timeline = usePolling(api.timeline, [], 3000, paused);
-  const recent = usePolling(() => api.events("", 12, 0), [], 3000, paused);
   const live = usePolling(api.liveStatus, [], 1000, paused);
   const tracker = usePolling(api.trackerStatus, [], 2000, paused);
   const countAudit = usePolling(() => api.count("latest"), [], 4000, paused);
@@ -200,33 +199,7 @@ export default function Overview({ summary, paused, onSelectVisitor, onOpenLive 
         </div>
 
         <div className="dash-side">
-          <Card title="Live Events" className="events-card">
-            {recent.data && recent.data.items.length > 0 ? (
-              <ul className="event-feed compact">
-                {recent.data.items.map((e) => {
-                  const kind = entryKindLabel(e.event_type, e.note);
-                  const isEntry = e.event_type === "entry";
-                  return (
-                    <li key={e.id}>
-                      <button type="button" className="event-row" onClick={() => onSelectVisitor(e.face_id)}>
-                        <Thumb src={e.image} size={32} round />
-                        <span className={`event-icon ${kind.kind}`}>
-                          {isEntry ? <ArrowDownLeft size={14} /> : <ArrowUpRight size={14} />}
-                        </span>
-                        <span className="event-meta">
-                          <b>ID: V{String(e.face_id).padStart(4, "0")}</b>
-                          <span className={`event-kind event-kind-${kind.kind}`}>{kind.label}</span>
-                        </span>
-                        <span className="event-time">{fmtTime(e.timestamp)}</span>
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
-            ) : (
-              <Empty title="No events yet" hint="Start a stream to see entries and exits." />
-            )}
-          </Card>
+          <LiveEventsFeed paused={paused} onSelectVisitor={onSelectVisitor} />
 
           <Card title="Camera & Processing" className="cam-card">
             <ul className="spec-list">

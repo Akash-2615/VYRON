@@ -28,6 +28,10 @@ DEFAULTS = {
         "model_pack": "buffalo_l", "det_size": 320, "match_threshold": 0.45,
         "soft_match_margin": 0.10, "register_min_det_score": 0.40,
         "mismatch_margin": 0.08,
+        # Min cosine gap vs next-best different face before claiming an existing ID.
+        "min_match_gap": 0.05,
+        # Rematch instead of FACE_REGISTERED when gallery sim >= this (anti twin-IDs).
+        "anti_split_threshold": 0.48,
         "max_embeddings_per_face": 5, "min_embeds_to_register": 2,
         "embed_retry_interval": 2, "max_embed_attempts": 10,
     },
@@ -59,11 +63,17 @@ DEFAULTS = {
         "min_aspect": 1.15,
         "max_aspect": 5.0,
     },
-    "away_tracker": {"high_conf": 0.4, "new_track_conf": 0.4, "iou_threshold": 0.25,
-                     "min_hits": 2, "max_lost_frames": 45},
-    "tracker": {"high_conf": 0.5, "new_track_conf": 0.5, "iou_threshold": 0.25,
-                "min_hits": 2, "max_lost_frames": 45,
-                "reentry_grace_frames": 75, "reentry_grace_sec": 25.0},
+    "away_tracker": {
+        "high_conf": 0.4, "new_track_conf": 0.4, "low_conf": 0.15,
+        "iou_threshold": 0.25, "low_iou_threshold": 0.20,
+        "min_hits": 2, "max_lost_frames": 45,
+    },
+    "tracker": {
+        "high_conf": 0.5, "new_track_conf": 0.5, "low_conf": 0.1,
+        "iou_threshold": 0.25, "low_iou_threshold": 0.20,
+        "min_hits": 2, "max_lost_frames": 45,
+        "reentry_grace_frames": 75, "reentry_grace_sec": 25.0,
+    },
     "presence": {
         "exit_grace_seconds": 10,
         "edge_exit_grace_seconds": 2,

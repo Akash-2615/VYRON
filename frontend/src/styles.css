@@ -980,7 +980,7 @@ a { color: var(--primary); cursor: pointer; }
 
 /* full-screen live page */
 .live-page {
-  display: grid; grid-template-columns: 180px minmax(0, 1fr);
+  display: grid; grid-template-columns: 180px minmax(0, 1fr) minmax(240px, 300px);
   gap: 12px; flex: 1; min-height: 0; height: 100%;
 }
 .live-page-kpis {
@@ -997,6 +997,16 @@ a { color: var(--primary); cursor: pointer; }
   font-size: 12.5px; color: var(--muted);
 }
 .live-tech-row b { color: var(--text); font-weight: 600; }
+.live-page-events {
+  min-height: 0; min-width: 0; display: flex; flex-direction: column;
+}
+.live-page-events > .events-card {
+  flex: 1; min-height: 0; display: flex; flex-direction: column;
+  overflow: hidden;
+}
+.live-page-events .event-feed {
+  overflow: auto; flex: 1; min-height: 0;
+}
 .live-page-stage { min-height: 0; min-width: 0; display: flex; }
 .live-page-stage > .live-fill {
   flex: 1; min-width: 0; min-height: 0;
@@ -1036,7 +1046,11 @@ a { color: var(--primary); cursor: pointer; }
   .dash-main { grid-template-rows: auto; }
   .content.overview-fit { overflow: auto; }
   .overview-page { height: auto; grid-template-rows: auto; }
-  .live-page { grid-template-columns: 1fr; overflow: auto; height: auto; }
+  .live-page {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(280px, 55vh) minmax(200px, 40vh);
+    overflow: auto; height: auto;
+  }
   .topbar-brand.is-visible { max-width: 140px; }
 }
 @media (max-width: 720px) {

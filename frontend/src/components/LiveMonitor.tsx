@@ -54,16 +54,27 @@ export default function LiveMonitor({ paused, compact = false, fullscreen = fals
     return () => { cancelled = true; window.clearInterval(id); };
   }, [paused, ppOn, compact]);
 
+  const stopping = Boolean(job?.stopping);
+  const running = Boolean(
+    !stopping && (job?.running || job?.starting || job?.thread_alive),
+  );
+  const busy = running || stopping;
+
+  // Poll JPEG (not MJPEG) so Stop tears down cleanly and every source refreshes.
   useEffect(() => {
-    if (!paused && status?.active) setTick((t) => t + 1);
-  }, [paused, status?.active]);
+    if (paused || !busy) return;
+    setTick((t) => t + 1);
+    const id = window.setInterval(() => setTick((t) => t + 1), 250);
+    return () => window.clearInterval(id);
+  }, [paused, busy, job?.frames, status?.age_sec]);
 
   useEffect(() => {
     if (paused) setFreezeKey(Date.now());
   }, [paused]);
 
   const active = Boolean(status?.active);
-  const running = Boolean(job?.running || job?.starting);
+  // Show last JPEG while the worker is busy even if encode briefly lags (>5s).
+  const showFrame = active || busy;
   const modeLabel = job?.mode === "local" ? "Local video"
     : job?.mode === "webcam" ? "Webcam" : "RTSP";
   const camLabel = job?.url
@@ -99,12 +110,12 @@ export default function LiveMonitor({ paused, compact = false, fullscreen = fals
         compact ? "live-compact" : "",
         "live-fill",
         fullscreen ? "live-fullscreen" : "",
-        active ? "live-active" : "",
+        showFrame ? "live-active" : "",
       ].filter(Boolean).join(" ")}
       title={fullscreen ? "Full-screen Live Monitor" : "Live Monitor"}
       action={
         <div className="live-actions">
-          {!running && <span className="live-cam-label">{camLabel}</span>}
+          {!busy && <span className="live-cam-label">{camLabel}</span>}
           {!fullscreen && (
             <button
               type="button"
@@ -116,7 +127,7 @@ export default function LiveMonitor({ paused, compact = false, fullscreen = fals
             </button>
           )}
           {/* Stop lives on the one-line stream banner while running */}
-          {running && fullscreen && (
+          {busy && fullscreen && (
             <button type="button" className="btn btn-danger btn-sm" onClick={() => void onStop()}>
               Stop
             </button>
@@ -125,17 +136,19 @@ export default function LiveMonitor({ paused, compact = false, fullscreen = fals
       }
     >
       <StreamLauncher paused={paused} />
-      {active ? (
+      {showFrame ? (
         <div className="live-frame-wrap">
           <div className="live-frame">
             {paused ? (
               <img key={freezeKey} src={`/api/live.jpg?t=${freezeKey}`} alt="Frozen live frame" />
             ) : (
-              <img key={tick} src={`/api/live?t=${tick}`} alt="Annotated live feed" />
+              <img src={`/api/live.jpg?t=${tick}`} alt="Annotated live feed" />
             )}
             <div className="live-status-bar">
               <span className="live-status-ok">●</span>
-              {status?.active ? (
+              {stopping ? (
+                <>Stopping stream…</>
+              ) : status?.active ? (
                 <>
                   {status.faces_in_frame ?? 0} face{(status.faces_in_frame ?? 0) === 1 ? "" : "s"}
                   {" · "}
@@ -144,6 +157,8 @@ export default function LiveMonitor({ paused, compact = false, fullscreen = fals
                   {status.persons_in_frame ?? 0} person{(status.persons_in_frame ?? 0) === 1 ? "" : "s"}
                   {ppOn ? " · preprocess on (see compare below)" : ""}
                 </>
+              ) : running ? (
+                <>Processing… waiting for next preview frame</>
               ) : (
                 <>Waiting for frames…</>
               )}

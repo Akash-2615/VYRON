@@ -142,6 +142,9 @@ def start_session(
         "detection_skip_frames": cfg.get("detection_skip_frames"),
         "match_threshold": (cfg.get("recognition") or {}).get("match_threshold"),
         "reset_on_start": reset,
+        # Same Postgres gallery for file / RTSP / webcam — leave Clear unchecked.
+        "shared_gallery": True,
+        "gallery_faces": db.unique_count(),
         "features": ",".join(features) if features else "none",
         "log_level": (cfg.get("logging") or {}).get("level", "INFO"),
     }

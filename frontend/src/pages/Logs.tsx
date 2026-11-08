@@ -3,6 +3,7 @@ import { Search } from "lucide-react";
 import { api2 } from "../api";
 import { Card, Empty } from "../components/ui";
 import { usePolling } from "../api";
+import { useStreamSync } from "../hooks/useStreamSync";
 import { eventTone } from "../utils";
 
 export default function Logs({ paused, onSelectVisitor }: { paused: boolean; onSelectVisitor: (id: number) => void }) {
@@ -11,10 +12,11 @@ export default function Logs({ paused, onSelectVisitor }: { paused: boolean; onS
   const [q, setQ] = useState("");
   const [limit, setLimit] = useState(300);
   const [source, setSource] = useState<"events" | "away">("events");
+  const { streaming, bust } = useStreamSync(paused);
   const { data, error } = usePolling(
     () => api2.logs(limit, event, level, q, source),
-    [event, level, q, limit, source],
-    3000,
+    [event, level, q, limit, source, bust],
+    streaming ? 800 : 2500,
     paused,
   );
   const counts = Object.entries(data?.counts ?? {}).sort((a, b) => b[1] - a[1]);

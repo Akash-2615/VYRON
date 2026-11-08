@@ -280,14 +280,43 @@ Suggested demo script: architecture overview → `config.json` frame-skip → St
 
 ## 6. Sample output (after a clean run)
 
-After `make fresh` or dashboard **Clear registered faces on Start**:
+**Screenshot pack (DOCX):** [`docs/assets/output/VYRON_Sample_Output_Screenshots.docx`](docs/assets/output/VYRON_Sample_Output_Screenshots.docx)  
+Same images: [`docs/assets/output/`](docs/assets/output/) · copy under [`samples/output_screenshots/`](samples/output_screenshots/)
+
+### Captured run (local video · Postgres · 8 Nov 2026)
+
+| Metric | Value (Configuration audit) | Later Live Monitor |
+|---|---|---|
+| Unique visitors (`faces`) | **54** | **58–59** (session continued) |
+| Entries / Exits | **114 / 114** | **149 / 149** |
+| Count audit | **Consistent** (DB gallery = log gallery) | — |
+| Peak occupancy | 20 | — |
+| Source | Local MP4 | `video_sample1.mp4` / `record_…mp4` |
+
+Also on disk after a run:
 
 - `logs/events.log` — `SYSTEM_START` … `FACE_REGISTERED` / `ENTRY` / `EXIT` … `COUNT_SNAPSHOT` / `SYSTEM_STOP`
 - Crops — `logs/faces/`, `logs/entries/`, `logs/exits/` (dated folders)
 - Postgres — `faces`, `embeddings`, `events`, `visits`
-- Reconcile — `make count` · export — `python3 backend/scripts/report.py --csv-dir samples`
+- Reconcile — `make count`
 
-Paste concrete counts / crop paths from your submission run: `<ADD AFTER FINAL RUN>`
+### What each screenshot shows
+
+| # | File | Explanation |
+|---|---|---|
+| 1 | [`01_overview_idle.png`](docs/assets/output/01_overview_idle.png) | Overview before Start — KPIs at zero, empty Live Monitor. |
+| 2 | [`02_overview_live_kpis.png`](docs/assets/output/02_overview_live_kpis.png) | Overview mid-run — unique 56, entries/exits, live IDs, charts, Live Events, AI pipeline. |
+| 3 | [`03_live_monitor_ids_noface.png`](docs/assets/output/03_live_monitor_ids_noface.png) | Live Monitor — face ID overlays + **NO-FACE** away tracks (not in unique count). |
+| 4 | [`04_live_monitor_crowd.png`](docs/assets/output/04_live_monitor_crowd.png) | Dense crowd on `video_sample1.mp4` — many simultaneous tracks + Live Events. |
+| 5 | [`05_registered_faces_gallery.png`](docs/assets/output/05_registered_faces_gallery.png) | Registered Faces gallery — unique IDs, visits, dwell, appearance tags. |
+| 6 | [`06_visitor_appearance.png`](docs/assets/output/06_visitor_appearance.png) | Visitor drawer — visit history + OpenCLIP appearance crop/tags. |
+| 7 | [`07_visitor_embedding.png`](docs/assets/output/07_visitor_embedding.png) | Face & Embedding — ArcFace 512-d samples, heatmap, match threshold. |
+| 8 | [`08_visitor_closest_identities.png`](docs/assets/output/08_visitor_closest_identities.png) | Closest other identities — cosine scores below threshold (no false merge). |
+| 9 | [`09_aria_assistant.png`](docs/assets/output/09_aria_assistant.png) | ARIA answers “Who stayed longest?” against live gallery stats. |
+| 10 | [`10_event_logs.png`](docs/assets/output/10_event_logs.png) | Event Logs — ENTRY/EXIT table with crop evidence, track, frame. |
+| 11 | [`11_analytics_noface.png`](docs/assets/output/11_analytics_noface.png) | Analytics — no-face / away people excluded from unique count. |
+| 12 | [`12_configuration_audit.png`](docs/assets/output/12_configuration_audit.png) | Configuration — invariants + **Consistent** DB↔log count audit. |
+| 13 | [`13_system_log.png`](docs/assets/output/13_system_log.png) | System Log — `events.log` tail (`FACE_RECOGNIZED`, `EXIT`, crop paths). |
 
 ---
 

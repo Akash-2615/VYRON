@@ -129,9 +129,11 @@ class TrackerJob:
         self._lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
         self._stop = {"flag": False}
+        self._active_source = None  # FrameSource; interrupted on Stop so RTSP unblocks
         self._state: Dict[str, Any] = {
             "running": False,
             "starting": False,
+            "stopping": False,
             "url": None,
             "mode": None,
             "playlist": None,
@@ -150,18 +152,43 @@ class TrackerJob:
             alive = self._thread is not None and self._thread.is_alive()
             out = dict(self._state)
             out["thread_alive"] = alive
+            stopping = bool(out.get("stopping"))
             if not alive:
                 # Reclaim finished worker so Start is not blocked by a dead Thread object.
                 self._thread = None
                 out["running"] = False
                 out["starting"] = False
+                out["stopping"] = False
+                self._state["stopping"] = False
+            elif stopping:
+                # Stop requested — do not keep the UI stuck on "Streaming".
+                out["running"] = False
+                out["starting"] = False
             else:
-                # Thread still alive (active or stuck after Stop) — UI must show Stop.
+                # Thread still alive — UI must show Stop while active/starting.
                 out["running"] = bool(out.get("running") or not out.get("starting"))
                 out["starting"] = bool(out.get("starting"))
                 if not out["running"] and not out["starting"]:
                     out["running"] = True
             return out
+
+    def _bind_source(self, src) -> None:
+        with self._lock:
+            self._active_source = src
+
+    def _interrupt_source(self) -> None:
+        with self._lock:
+            src = self._active_source
+        if src is None:
+            return
+        try:
+            src.interrupt()
+        except Exception:  # noqa: BLE001
+            log.exception("FrameSource.interrupt failed")
+
+    def _set_progress(self, frames: int) -> None:
+        with self._lock:
+            self._state["frames"] = int(frames)
 
     def _reclaim_worker(self, wait_sec: float = 2.0) -> bool:
         """Signal stop and drop a hung worker reference if it will not exit.
@@ -172,23 +199,35 @@ class TrackerJob:
             t = self._thread
             if t is None or not t.is_alive():
                 self._thread = None
+                self._active_source = None
                 self._state["running"] = False
                 self._state["starting"] = False
+                self._state["stopping"] = False
                 return True
             self._stop["flag"] = True
+            # Flip UI out of Streaming immediately (join may still take a moment).
+            self._state["running"] = False
+            self._state["starting"] = False
+            self._state["stopping"] = True
+        # Unblock RTSP/webcam VideoCapture.read() waiting inside the worker.
+        self._interrupt_source()
         t.join(timeout=wait_sec)
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 # Webcam/OpenCV can block forever on release; abandon so Start + clear work.
                 log.warning("tracker worker did not exit after stop; reclaiming slot")
                 self._thread = None
+                self._active_source = None
                 self._state["running"] = False
                 self._state["starting"] = False
+                self._state["stopping"] = False
                 self._state["error"] = "Previous tracker was force-stopped (hung worker)."
                 return True
             self._thread = None
+            self._active_source = None
             self._state["running"] = False
             self._state["starting"] = False
+            self._state["stopping"] = False
             return True
 
     def start(
@@ -216,7 +255,9 @@ class TrackerJob:
             resolved = [_normalize_rtsp(url)]
             playlist_l = "one"
         elif mode_l == "webcam":
-            resolved = [_normalize_webcam(url or "0")]
+            # Skip exclusive probe — opening the cam twice races Stop/Start on macOS
+            # and can leave the UI "Streaming" with a stuck/black capture.
+            resolved = [_normalize_webcam(url or "0", probe=False)]
             playlist_l = "one"
         elif mode_l == "local":
             if playlist_l == "all":
@@ -252,6 +293,7 @@ class TrackerJob:
             self._state.update({
                 "running": False,
                 "starting": True,
+                "stopping": False,
                 "url": resolved[0],
                 "mode": mode_l,
                 "playlist": playlist_l,
@@ -274,7 +316,8 @@ class TrackerJob:
         return self.status()
 
     def stop(self) -> Dict[str, Any]:
-        self._reclaim_worker(wait_sec=8.0)
+        # Short join: interrupt() should unblock RTSP quickly; reclaim if still hung.
+        self._reclaim_worker(wait_sec=3.0)
         return self.status()
 
     def _run(
@@ -378,6 +421,8 @@ class TrackerJob:
                     live_quality=int(out.get("live_jpeg_quality", 92)),
                     live_max_width=int(out.get("live_max_width", 0) or 0),
                     live_every=int(out.get("live_every_n_frames", 2)),
+                    on_source=self._bind_source,
+                    on_progress=self._set_progress,
                 )
 
             try:
@@ -399,6 +444,8 @@ class TrackerJob:
                 except Exception:  # noqa: BLE001
                     pass
         finally:
+            with self._lock:
+                self._active_source = None
             if db is not None:
                 try:
                     db.close()
@@ -407,6 +454,7 @@ class TrackerJob:
             with self._lock:
                 self._state["running"] = False
                 self._state["starting"] = False
+                self._state["stopping"] = False
 
 
 _JOB: Optional[TrackerJob] = None

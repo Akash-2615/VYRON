@@ -35,6 +35,30 @@ class Gallery:
         i = int(np.argmax(sims))
         return self._ids[i], float(sims[i])
 
+    def match_with_gap(self, emb: np.ndarray) -> Tuple[Optional[int], float, float]:
+        """Best face + cosine sim + gap to the next-best *different* face_id.
+
+        A small gap means two gallery identities look almost equally close — do not
+        claim either as a hard match (crowd / motion blur collisions).
+        """
+        if not self._ids:
+            return None, -1.0, 0.0
+        if self._mat is None:
+            self._mat = np.stack(self._vecs)
+        sims = self._mat @ emb.astype(np.float32)
+        i = int(np.argmax(sims))
+        best_id = int(self._ids[i])
+        best_sim = float(sims[i])
+        rival = -1.0
+        for j, fid in enumerate(self._ids):
+            if int(fid) == best_id:
+                continue
+            s = float(sims[j])
+            if s > rival:
+                rival = s
+        gap = best_sim - rival if rival >= 0.0 else best_sim
+        return best_id, best_sim, float(gap)
+
     def similarity_to(self, face_id: int, emb: np.ndarray) -> float:
         """Best cosine similarity of ``emb`` against stored vectors for ``face_id``."""
         if not self._ids:

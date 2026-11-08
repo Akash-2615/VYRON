@@ -3,6 +3,7 @@ import { ChevronLeft, ChevronRight } from "lucide-react";
 import { api } from "../api";
 import { Badge, Card, Empty, Thumb } from "../components/ui";
 import { usePolling } from "../api";
+import { useStreamSync } from "../hooks/useStreamSync";
 import { entryKindLabel, fmtDateTime } from "../utils";
 
 const PAGE_SIZE = 15;
@@ -10,7 +11,13 @@ const PAGE_SIZE = 15;
 export default function Events({ paused, onSelectVisitor }: { paused: boolean; onSelectVisitor: (id: number) => void }) {
   const [type, setType] = useState("");
   const [page, setPage] = useState(0);
-  const { data, error } = usePolling(() => api.events(type, PAGE_SIZE, page * PAGE_SIZE), [type, page], 3000, paused);
+  const { streaming, bust } = useStreamSync(paused);
+  const { data, error } = usePolling(
+    () => api.events(type, PAGE_SIZE, page * PAGE_SIZE),
+    [type, page, bust],
+    streaming ? 800 : 2500,
+    paused,
+  );
   const pages = Math.max(1, Math.ceil((data?.total ?? 0) / PAGE_SIZE));
 
   return (

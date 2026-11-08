@@ -67,8 +67,14 @@ def _scale_tracks(tracks, scale: float):
 
 def run_source(source, cfg, pipeline, db, events, stop, display, max_frames, out_path,
                live_path: str = "", live_quality: int = 92, live_max_width: int = 0,
-               live_every: int = 2) -> int:
-    src = FrameSource(source, cfg["stream"]).start()
+               live_every: int = 2, on_source=None, on_progress=None) -> int:
+    # Share stop dict so RTSP/webcam FrameSource.interrupt() unblocks on dashboard Stop.
+    src = FrameSource(source, cfg["stream"], stop=stop).start()
+    if on_source is not None:
+        try:
+            on_source(src)
+        except Exception:  # noqa: BLE001
+            logging.exception("on_source register failed")
     # Annotated MP4 at full CCTV resolution is a major lag source — skip on live / when unset.
     if src.is_live or not out_path:
         out_path = ""
@@ -167,6 +173,12 @@ def run_source(source, cfg, pipeline, db, events, stop, display, max_frames, out
                 idx += 1
                 continue
             idx += 1
+            # Progress every few frames so dashboard Live Events / status stay in sync.
+            if on_progress is not None and (idx <= 3 or idx % 5 == 0):
+                try:
+                    on_progress(idx)
+                except Exception:  # noqa: BLE001
+                    pass
             if idx % 30 == 0:
                 fps = idx / max(time.time() - t0, 1e-6)
                 unique_cached = db.unique_count()
@@ -288,7 +300,14 @@ def run_source(source, cfg, pipeline, db, events, stop, display, max_frames, out
             unique_so_far=unique_now,
         )
         _count_snapshot(source=source, frames=idx, reason=end_reason)
-        src.release()
+        try:
+            src.release()
+        finally:
+            if on_source is not None:
+                try:
+                    on_source(None)
+                except Exception:  # noqa: BLE001
+                    logging.exception("on_source clear failed")
         if writer:
             writer.release()
     return idx

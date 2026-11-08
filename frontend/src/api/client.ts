@@ -218,6 +218,7 @@ export interface TrackerJobStatus {
   ok?: boolean;
   running: boolean;
   starting: boolean;
+  stopping?: boolean;
   url: string | null;
   mode?: string | null;
   playlist?: string | null;

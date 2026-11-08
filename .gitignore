@@ -32,6 +32,14 @@ models/*.pt
 Video Datasets/
 output/
 demo/
+# Keep submission screenshot pack (docs + samples copies)
+!docs/assets/output/
+!docs/assets/output/**
+!samples/output_screenshots/
+!samples/output_screenshots/**
+# DOCX embeds already compress; skip redundant JPEG previews in git
+docs/assets/output/*.jpg
+samples/output_screenshots/*.jpg
 
 # logs: keep sample deliverables committable; ignore archive + bulky
 logs/archive/

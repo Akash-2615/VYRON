@@ -164,7 +164,10 @@ def test_soft_match_avoids_split_on_near_threshold(tmp_path):
     cfg["detection_skip_frames"] = 0
     cfg["recognition"]["match_threshold"] = 0.52
     cfg["recognition"]["soft_match_margin"] = 0.10
+    cfg["recognition"]["min_match_gap"] = 0.04
     cfg["recognition"]["min_embeds_to_register"] = 2
+    cfg["tracker"]["max_lost_frames"] = 5
+    cfg["tracker"]["reentry_grace_frames"] = 0
     cfg["presence"]["exit_grace_seconds"] = 0.4
     cfg["presence"]["stationary_grace_seconds"] = 0.4
     cfg["presence"]["edge_exit_grace_seconds"] = 0.2
@@ -195,8 +198,9 @@ def test_soft_match_avoids_split_on_near_threshold(tmp_path):
     for i in range(40, 100):
         pipe.process_frame(make_frame(None, None), i, ts=i / 25.0)
     emb.mode = "near"
+    # Far from first box so lost-pool IoU cannot reclaim — identity must soft-match.
     for i in range(100, 150):
-        pipe.process_frame(make_frame(30, None), i, ts=i / 25.0)
+        pipe.process_frame(make_frame(220, None), i, ts=i / 25.0)
     pipe.finalize()
     assert db.unique_count() == 1
     log = (tmp_path / "logs" / "events.log").read_text()

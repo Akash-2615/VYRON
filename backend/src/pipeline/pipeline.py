@@ -105,6 +105,13 @@ class FaceTrackingPipeline:
         self._last_frame_wall: Optional[float] = None
         self._brightness_ema: Optional[float] = None
         self._active_before_loss: int = 0
+        self._disturbance_cooldown_until: float = 0.0
+        self._brightness_jump_thr: float = float(
+            (cfg.get("presence") or {}).get("brightness_jump_threshold", 70.0))
+        self._disturbance_min_sec: float = float(
+            (cfg.get("presence") or {}).get("disturbance_min_seconds", 0.6))
+        self._disturbance_cooldown_sec: float = float(
+            (cfg.get("presence") or {}).get("disturbance_cooldown_seconds", 3.0))
 
     def set_timing(self, fps: float, live: bool = False) -> None:
         self.fps = max(1e-3, float(fps or 25.0))
@@ -229,8 +236,8 @@ class FaceTrackingPipeline:
         active, removed = self.tracker.update(dets, frame_size)
         self._detect_disturbance(frame, n_before, removed, clock)
 
-        # Crowded frames: only embed the strongest unidentified faces each cycle.
-        max_id = max(0, int(self.rec.get("max_identify_per_frame", 6) or 6))
+        # Crowded frames: embed strongest unidentified faces. <=0 = no cap.
+        max_id = int(self.rec.get("max_identify_per_frame", 6) or 0)
         id_candidates: List[Track] = []
         for t in active:
             t.kind = "face"
@@ -255,7 +262,8 @@ class FaceTrackingPipeline:
             key=lambda x: (len(getattr(x, "pending", []) or []), float(getattr(x, "conf", 0) or 0)),
             reverse=True,
         )
-        for t in id_candidates[:max_id]:
+        batch = id_candidates if max_id <= 0 else id_candidates[:max_id]
+        for t in batch:
             self._try_identify(t, frame)
 
         removed_list = list(removed)
@@ -277,15 +285,19 @@ class FaceTrackingPipeline:
                 if t.owns and t.face_id is not None:
                     self._on_track_removed(t, reason="lost", frame_size=frame_size)
 
-        if self.presence.in_disturbance() and self._disturbance_cleared(active):
+        if self.presence.in_disturbance():
             started = self.presence.disturbance_until
-            duration = max(0.0, float(clock) - float(started)) if started is not None else 0.0
-            self.presence.unfreeze_deadlines(clock)
-            self.events.log(
-                "DISTURBANCE_END",
-                ts=self._iso(clock),
-                duration_sec=f"{duration:.3f}",
-            )
+            held = (float(clock) - float(started)) if started is not None else 0.0
+            # Webcam auto-gain causes flicker — hold disturbance briefly or we log
+            # START/END every frame and starve the API (Stop + Live Events hang).
+            if held >= self._disturbance_min_sec and self._disturbance_cleared(active):
+                self.presence.unfreeze_deadlines(clock)
+                self._disturbance_cooldown_until = float(clock) + self._disturbance_cooldown_sec
+                self.events.log(
+                    "DISTURBANCE_END",
+                    ts=self._iso(clock),
+                    duration_sec=f"{held:.3f}",
+                )
 
         self._flush_due_exits(force=False)
         self._flush_pending_away_exits(force=False)
@@ -970,16 +982,42 @@ class FaceTrackingPipeline:
 
         thr = float(self.rec["match_threshold"])
         soft = float(self.rec.get("soft_match_margin", 0.10))
+        min_gap = float(self.rec.get("min_match_gap", 0.05))
         min_reg = float(self.rec.get("register_min_det_score", 0.40))
-        fid, sim = self.gallery.match(emb)
-        if fid is not None and sim >= thr:
-            self._identified(t, fid, sim, emb, frame, is_new=False)
-            return
-        # Profile / crossed-face: near-threshold hit is the same person, not a new ID.
-        if fid is not None and sim >= thr - soft:
-            self.events.log("FACE_SOFT_MATCH", face_id=fid, track=t.id,
-                            similarity=f"{sim:.3f}", threshold=f"{thr:.2f}")
-            self._identified(t, fid, sim, emb, frame, is_new=False)
+
+        anti_split = float(self.rec.get("anti_split_threshold", max(0.45, thr - 0.08)))
+
+        def _claim_existing(emb_vec: np.ndarray, note: str = "") -> bool:
+            """Prefer rematch over minting twins (RTSP lighting often dips under thr)."""
+            fid, sim, gap = self.gallery.match_with_gap(emb_vec)
+            if fid is None:
+                return False
+            # Hard match: strong sim + clear margin vs other gallery faces.
+            if sim >= thr and gap >= min_gap:
+                self._identified(t, fid, sim, emb_vec, frame, is_new=False)
+                return True
+            # Soft match: near-threshold with enough gap.
+            if soft > 0 and sim >= thr - soft and gap >= min_gap:
+                self.events.log(
+                    "FACE_SOFT_MATCH", face_id=fid, track=t.id,
+                    similarity=f"{sim:.3f}", threshold=f"{thr:.2f}",
+                    gap=f"{gap:.3f}", note=note or "",
+                )
+                self._identified(t, fid, sim, emb_vec, frame, is_new=False)
+                return True
+            # Strong sim but two gallery faces look similar — still attach to best
+            # rather than minting a third twin ID.
+            if sim >= thr and gap < min_gap:
+                self.events.log(
+                    "FACE_MATCH_AMBIGUOUS", face_id=fid, track=t.id,
+                    similarity=f"{sim:.3f}", gap=f"{gap:.3f}", min_gap=f"{min_gap:.2f}",
+                    note=note or "claim_best",
+                )
+                self._identified(t, fid, sim, emb_vec, frame, is_new=False)
+                return True
+            return False
+
+        if _claim_existing(emb):
             return
 
         t.pending.append(emb)
@@ -987,14 +1025,7 @@ class FaceTrackingPipeline:
         if len(t.pending) < self.rec["min_embeds_to_register"]:
             return
         mean = normalize(np.mean(t.pending, axis=0))
-        fid, sim = self.gallery.match(mean)
-        if fid is not None and sim >= thr:
-            self._identified(t, fid, sim, mean, frame, is_new=False)
-            return
-        if fid is not None and sim >= thr - soft:
-            self.events.log("FACE_SOFT_MATCH", face_id=fid, track=t.id,
-                            similarity=f"{sim:.3f}", threshold=f"{thr:.2f}", note="mean")
-            self._identified(t, fid, sim, mean, frame, is_new=False)
+        if _claim_existing(mean, note="mean"):
             return
         # Weak InsightFace det scores (blur / profile) mint junk identities — wait.
         best_score = max(t.pending_scores) if t.pending_scores else float(score)
@@ -1004,6 +1035,17 @@ class FaceTrackingPipeline:
                 keep = int(self.rec["min_embeds_to_register"])
                 t.pending = t.pending[-keep:]
                 t.pending_scores = t.pending_scores[-keep:]
+            return
+        # Anti-split: RTSP / angle change often lands just under thr against an
+        # existing face (e.g. V0005). Never mint a twin when gallery is that close.
+        fid_near, sim_near, gap_near = self.gallery.match_with_gap(mean)
+        if fid_near is not None and sim_near >= anti_split:
+            self.events.log(
+                "FACE_ANTI_SPLIT", face_id=fid_near, track=t.id,
+                similarity=f"{sim_near:.3f}", gap=f"{gap_near:.3f}",
+                anti_split=f"{anti_split:.2f}", threshold=f"{thr:.2f}",
+            )
+            self._identified(t, int(fid_near), float(sim_near), mean, frame, is_new=False)
             return
         new_id = self.db.add_face(self._ts.isoformat(timespec="milliseconds"))
         self.gallery.add(new_id, mean)
@@ -1024,9 +1066,9 @@ class FaceTrackingPipeline:
 
         existing = self.db.get_appearance_summary(face_id)
         want = bool(self.appearance_cfg.get("describe_on_register", True))
-        # Only describe on first registration — re-id / mismatch must not overwrite
-        # clothing with a neighbour's body crop.
-        if is_new and want:
+        # Fill once when empty (new face or older row missing tags). Never overwrite
+        # an existing summary — re-id can grab a neighbour's body crop.
+        if want and not existing:
             t.appearance_summary = self._describe_appearance(face_id, frame, t.box)
         else:
             t.appearance_summary = existing
@@ -1312,20 +1354,28 @@ class FaceTrackingPipeline:
                 self.presence.freeze_deadlines(clock, reason="mass_loss")
                 self.events.log("DISTURBANCE_START", ts=self._iso(clock), reason="mass_loss",
                                 lost=len(removed), active_before=n_before)
-        # Brightness collapse / flicker
+        # Brightness collapse / flicker (debounced — webcam AE otherwise floods logs).
         try:
             mean = float(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).mean())
         except Exception:  # noqa: BLE001
             return
         if self._brightness_ema is None:
             self._brightness_ema = mean
-        else:
-            jump = abs(mean - self._brightness_ema)
-            self._brightness_ema = 0.9 * self._brightness_ema + 0.1 * mean
-            if jump > 40 and n_before >= 1 and not self.presence.in_disturbance():
-                self.presence.freeze_deadlines(clock, reason="brightness_jump")
-                self.events.log("DISTURBANCE_START", ts=self._iso(clock),
-                                reason="brightness_jump", delta=f"{jump:.1f}")
+            return
+        jump = abs(mean - self._brightness_ema)
+        self._brightness_ema = 0.9 * self._brightness_ema + 0.1 * mean
+        if (
+            jump > self._brightness_jump_thr
+            and n_before >= 1
+            and not self.presence.in_disturbance()
+            and float(clock) >= float(self._disturbance_cooldown_until)
+        ):
+            self._active_before_loss = max(int(n_before), 1)
+            self.presence.freeze_deadlines(clock, reason="brightness_jump")
+            self.events.log(
+                "DISTURBANCE_START", ts=self._iso(clock),
+                reason="brightness_jump", delta=f"{jump:.1f}",
+            )
 
     def _disturbance_cleared(self, active: List[Track]) -> bool:
         if not self.presence.in_disturbance():

@@ -23,7 +23,16 @@ export default function App() {
   const [assistantOpen, setAssistantOpen] = useState(() => {
     try { return localStorage.getItem(ASSISTANT_KEY) === "1"; } catch { return false; }
   });
-  const summary = usePolling(api.summary, [], 3000, paused);
+  const tracker = usePolling(api.trackerStatus, [], 1500, paused);
+  const streaming = Boolean(
+    tracker.data?.running || tracker.data?.starting || tracker.data?.thread_alive,
+  );
+  const summary = usePolling(
+    api.summary,
+    [tracker.data?.frames ?? 0, tracker.data?.unique_visitors ?? ""],
+    streaming ? 1000 : 3000,
+    paused,
+  );
 
   useEffect(() => {
     try { localStorage.setItem(ASSISTANT_KEY, assistantOpen ? "1" : "0"); } catch { /* ignore */ }
@@ -71,7 +80,13 @@ export default function App() {
             onOpenLive={() => setPage("live")}
           />
         )}
-        {page === "live" && <Live summary={summary.data} paused={paused} />}
+        {page === "live" && (
+          <Live
+            summary={summary.data}
+            paused={paused}
+            onSelectVisitor={setSelected}
+          />
+        )}
         {page === "visitors" && <Visitors paused={paused} onSelectVisitor={setSelected} />}
         {page === "events" && <Events paused={paused} onSelectVisitor={setSelected} />}
         {page === "analytics" && (

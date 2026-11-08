@@ -262,6 +262,29 @@ class Database:
             self._conn.commit()
             return fid
 
+    def delete_face(self, face_id: int) -> bool:
+        """Remove one gallery identity and all related rows (embeddings / events / visits)."""
+        fid = int(face_id)
+        with self._lock:
+            row = self._execute("SELECT face_id FROM faces WHERE face_id=?", (fid,)).fetchone()
+            if row is None:
+                return False
+            self._execute(
+                "UPDATE away_visitors SET linked_face_id=NULL WHERE linked_face_id=?", (fid,))
+            self._execute("DELETE FROM embeddings WHERE face_id=?", (fid,))
+            self._execute("DELETE FROM events WHERE face_id=?", (fid,))
+            self._execute("DELETE FROM visits WHERE face_id=?", (fid,))
+            self._execute("DELETE FROM faces WHERE face_id=?", (fid,))
+            self._conn.commit()
+            return True
+
+    def delete_faces(self, face_ids) -> List[int]:
+        removed = []
+        for fid in face_ids:
+            if self.delete_face(int(fid)):
+                removed.append(int(fid))
+        return removed
+
     def add_embedding(self, face_id: int, vec: np.ndarray, ts: str,
                       image_path: Optional[str] = None) -> None:
         blob = vec.astype(np.float32).tobytes()

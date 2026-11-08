@@ -113,9 +113,16 @@ class Track:
 
 class ByteTrackLite:
     def __init__(self, cfg: dict, detect_interval: int, presence_cfg: Optional[dict] = None):
-        self.high_conf = cfg["high_conf"]
-        self.new_conf = cfg["new_track_conf"]
-        self.iou_thr = cfg["iou_threshold"]
+        self.high_conf = float(cfg["high_conf"])
+        self.new_conf = float(cfg["new_track_conf"])
+        self.iou_thr = float(cfg["iou_threshold"])
+        # Stage-2 floor: dets in [low_conf, high_conf) may only *continue* tracks,
+        # never birth new ones (ByteTrack second association).
+        self.low_conf = float(cfg.get("low_conf", 0.1))
+        if self.low_conf > self.high_conf:
+            self.low_conf = self.high_conf
+        # Slightly looser IoU for weak dets (motion blur / partial faces).
+        self.low_iou = float(cfg.get("low_iou_threshold", max(0.05, self.iou_thr * 0.85)))
         self.min_hits = cfg["min_hits"]
         self.max_lost = cfg["max_lost_frames"]
         self.interval = detect_interval + 1
@@ -227,23 +234,34 @@ class ByteTrackLite:
             t.predict(self.interval - 1)
 
         if dets is not None:
-            high = [i for i in range(len(dets)) if dets[i, 4] >= self.high_conf]
-            low = [i for i in range(len(dets)) if dets[i, 4] < self.high_conf]
+            # ByteTrack split: high → first association + possible new tracks;
+            # low → second association only (recover temporarily weak detections).
+            high = [i for i in range(len(dets)) if float(dets[i, 4]) >= self.high_conf]
+            low = [
+                i for i in range(len(dets))
+                if self.low_conf <= float(dets[i, 4]) < self.high_conf
+            ]
 
             matches, un_t, un_high = self._match(self.tracks, dets, high)
             for ti, di in matches:
                 self.tracks[ti].update(dets[di, :4], float(dets[di, 4]), ts=self._ts)
 
-            # stage 2: low-confidence detections rescue still-unmatched tracks (hysteresis)
-            rest = [self.tracks[i] for i in un_t]
-            m2, still_un_rest, un_low = self._match(rest, dets, low)
+            # Stage 2: prefer confirmed unmatched tracks, then tentatives.
+            rest_idx = sorted(
+                un_t,
+                key=lambda i: (0 if self.is_confirmed(self.tracks[i]) else 1, i),
+            )
+            rest = [self.tracks[i] for i in rest_idx]
+            m2, _still_un_rest, _un_low = self._match(
+                rest, dets, low, iou_thr=self.low_iou)
             for ti, di in m2:
                 rest[ti].update(dets[di, :4], float(dets[di, 4]), ts=self._ts)
 
-            # Rematch lost-pool before creating brand-new tracks.
+            # Rematch lost-pool before creating brand-new tracks (high dets only).
             leftover = self._rematch_lost_pool(dets, un_high)
+            birth_thr = max(self.new_conf, self.high_conf)
             for di in leftover:
-                if dets[di, 4] >= self.new_conf:
+                if float(dets[di, 4]) >= birth_thr:
                     nt = Track(dets[di, :4], float(dets[di, 4]))
                     if self._ts is not None:
                         nt.last_seen_ts = float(self._ts)

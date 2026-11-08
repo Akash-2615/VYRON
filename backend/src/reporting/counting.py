@@ -492,10 +492,20 @@ def reconcile(
         and log_gallery is not None
         and log_counts.system_stop_unique != log_gallery
     ):
-        diffs.append(
-            f"SYSTEM_STOP_unique_visitors: "
-            f"gallery={log_gallery} stop={log_counts.system_stop_unique}"
-        )
+        # A later COUNT_SNAPSHOT (e.g. after manual gallery prune) is authoritative.
+        if (
+            log_counts.last_unique_total is not None
+            and log_counts.last_unique_total == log_gallery
+        ):
+            notes.append(
+                f"SYSTEM_STOP_unique_visitors superseded by later snapshot "
+                f"(stop={log_counts.system_stop_unique} gallery={log_gallery})"
+            )
+        else:
+            diffs.append(
+                f"SYSTEM_STOP_unique_visitors: "
+                f"gallery={log_gallery} stop={log_counts.system_stop_unique}"
+            )
     snap_u = snap.get("unique_total")
     if snap_u is not None and log_gallery is not None and snap_u != log_gallery:
         diffs.append(

@@ -94,14 +94,18 @@ def test_run_source_live_skips_annotated_mp4_and_sets_live(tmp_path, monkeypatch
     state = {"i": 0}
 
     class FakeLiveSource:
-        def __init__(self, source, cfg):
+        def __init__(self, source, cfg, stop=None):
             self.source = source
             self.is_live = True
             self.cfg = cfg
             self._cap = None
+            self._external_stop = stop
 
         def start(self):
             return self
+
+        def interrupt(self):
+            pass
 
         def read(self):
             i = state["i"]

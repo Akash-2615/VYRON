@@ -73,7 +73,10 @@ export default function StreamLauncher({ paused }: { paused: boolean }) {
     try { localStorage.setItem("vyron.localVideo", localPath); } catch { /* ignore */ }
   }, [localPath]);
 
+  const stopping = Boolean(job?.stopping);
   const running = Boolean(job?.running || job?.starting || job?.thread_alive);
+  // Keep the live banner (with Stop) visible while Stopping — don't flip to Start form early.
+  const showLiveChrome = running || stopping;
   const available = videos.filter((v) => v.exists);
 
   async function startOnce() {
@@ -126,10 +129,28 @@ export default function StreamLauncher({ paused }: { paused: boolean }) {
   async function onStop() {
     setErr(null);
     setBusy(true);
+    // Optimistic UI — Stop must feel instant even if webcam release is slow.
+    setJob((prev) => prev ? {
+      ...prev,
+      running: false,
+      starting: false,
+      stopping: true,
+      thread_alive: true,
+    } : prev);
     try {
-      setJob(await api.trackerStop());
+      let s = await api.trackerStop();
+      for (let i = 0; i < 10 && (s.running || s.starting || s.stopping || s.thread_alive); i++) {
+        await new Promise((r) => setTimeout(r, 200));
+        s = await api.trackerStatus();
+        if (!(s.running || s.starting || s.thread_alive) && !s.stopping) break;
+        if (i === 4 || i === 8) {
+          try { s = await api.trackerStop(); } catch { /* ignore */ }
+        }
+      }
+      setJob({ ...s, stopping: false, running: false, starting: false });
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
+      try { setJob(await api.trackerStatus()); } catch { /* ignore */ }
     } finally {
       setBusy(false);
     }
@@ -139,25 +160,28 @@ export default function StreamLauncher({ paused }: { paused: boolean }) {
     ? ` · video ${job.source_index ?? 1}/${job.source_total}`
     : "";
 
-  // While streaming: single status row + Stop (hide the picker chrome).
-  if (running) {
+  // While streaming / stopping: single status row + Stop (hide the picker chrome).
+  if (showLiveChrome) {
     const kind = job?.mode === "local" ? "file"
       : job?.mode === "webcam" ? "webcam"
         : "RTSP";
     const label = job?.mode === "webcam"
       ? `cam ${job?.url ?? "0"}`
       : PathName(job?.url);
-    const via = job?.starting
-      ? "Starting models…"
-      : `${kind}${progress}${label ? ` · ${label}` : ""}${job?.backend ? ` · ${job.backend}` : ""}`;
+    const via = stopping
+      ? "Stopping…"
+      : job?.starting
+        ? "Starting models…"
+        : `${kind}${progress}${label ? ` · ${label}` : ""}${job?.backend ? ` · ${job.backend}` : ""}`;
     return (
       <div className="rtsp-launcher stream-launcher stream-launcher-live">
         <div className="rtsp-row stream-live-row">
           <p className="stream-via" title={via}>
-            <span className="stream-via-dot" aria-hidden />Streaming · {via}
+            <span className="stream-via-dot" aria-hidden />
+            {stopping ? "Stopping" : "Streaming"} · {via}
           </p>
-          <button type="button" className="btn btn-danger btn-sm" disabled={busy} onClick={() => void onStop()}>
-            <Square size={14} /> Stop
+          <button type="button" className="btn btn-danger btn-sm" disabled={busy && stopping} onClick={() => void onStop()}>
+            <Square size={14} /> {stopping ? "Stopping…" : "Stop"}
           </button>
         </div>
         {job?.error && <p className="rtsp-error">{job.error}</p>}
@@ -321,11 +345,11 @@ export default function StreamLauncher({ paused }: { paused: boolean }) {
         />
         Clear registered faces on Start
       </label>
-      {clearDb && (
-        <p className="muted small" style={{ margin: "4px 0 0" }}>
-          Next Start wipes the face gallery + session log, then opens a fresh stream.
-        </p>
-      )}
+      <p className="muted small" style={{ margin: "4px 0 0" }}>
+        {clearDb
+          ? "Next Start wipes the face gallery + session log (same person on file/RTSP/webcam will get new IDs)."
+          : "Leave unchecked so the same person keeps one ID across local file, RTSP, and webcam."}
+      </p>
 
       <p className="muted small rtsp-hint">{modeHint}</p>
       {err && <p className="rtsp-error">{err}</p>}
