@@ -21,14 +21,15 @@ class YoloPersonDetector:
         self.conf = float(cfg.get("conf_threshold", 0.35))
         self.imgsz = int(cfg.get("imgsz", 640))
         self.device = _resolve_device(cfg.get("device", "auto"))
-        # Ultralytics 8.4+: `half=` deprecated → `quantize=16` (FP16) / None (FP32).
-        self.quantize = 16 if self.device != "cpu" else None
+        # FP16 on CUDA when available. `quantize=` is invalid in current Ultralytics.
+        self.half = self.device not in ("cpu", "mps")
         self.min_h = int(cfg.get("min_height_px", 60))
         self.min_w = int(cfg.get("min_width_px", 20))
         self.min_aspect = float(cfg.get("min_aspect", 1.15))   # h/w — reject flat blobs
         self.max_aspect = float(cfg.get("max_aspect", 5.5))    # reject ultra-thin floor streaks
         self.nms_iou = float(cfg.get("nms_iou", 0.55))
-        log.info("YOLO person detector ready (weights=%s device=%s)", weights, self.device)
+        log.info("YOLO person detector ready (weights=%s device=%s half=%s)",
+                 weights, self.device, self.half)
 
     @staticmethod
     def _nms(dets: np.ndarray, iou_thr: float) -> np.ndarray:
@@ -58,7 +59,7 @@ class YoloPersonDetector:
     def detect(self, frame: np.ndarray) -> np.ndarray:
         res = self.model.predict(
             frame, imgsz=self.imgsz, conf=self.conf, device=self.device,
-            quantize=self.quantize, classes=[0], verbose=False)[0]  # 0 = person
+            half=self.half, classes=[0], verbose=False)[0]  # 0 = person
         if res.boxes is None or len(res.boxes) == 0:
             return np.zeros((0, 5), dtype=np.float32)
         xyxy = res.boxes.xyxy.cpu().numpy()

@@ -336,7 +336,17 @@ class TrackerJob:
             from src.pipeline import FaceTrackingPipeline
             from src.session_svc import start_session, stop_session
             from src.storage import log_db_open, open_database
-            from main import run_source
+            # Load backend/main.py explicitly — repo-root main.py is a shim that
+            # executes CLI main() and breaks when imported from a worker thread.
+            import importlib.util
+            from pathlib import Path as _Path
+            _cli = _Path(__file__).resolve().parents[2] / "main.py"
+            _spec = importlib.util.spec_from_file_location("facetrack_cli_main", _cli)
+            if _spec is None or _spec.loader is None:
+                raise ImportError(f"Cannot load CLI module at {_cli}")
+            _cli_mod = importlib.util.module_from_spec(_spec)
+            _spec.loader.exec_module(_cli_mod)
+            run_source = _cli_mod.run_source
 
             cfg = load_config(config_path)
             cfg.setdefault("output", {})
